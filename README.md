@@ -84,6 +84,7 @@
 ```
 
 - 验收：Case 1–8 全部通过，见 [docs/AGENT_BENCHMARK.md](docs/AGENT_BENCHMARK.md)、[docs/AI_UPGRADE_ACCEPTANCE.md](docs/AI_UPGRADE_ACCEPTANCE.md)
+- 下载：[v1.9 Release](https://github.com/rockfox0/ai-usage-guard/releases/tag/v1.9)（debug 签名，versionCode 35）
 - 一键跑 Benchmark：`./scripts/agent_bench.sh`（纯 JVM，无需设备/Key）
 - 真机调试（仅 debug 构建）：
   ```bash

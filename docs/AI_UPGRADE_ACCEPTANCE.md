@@ -2,7 +2,8 @@
 
 - 规格：《AI Usage Guard — AI Intelligence & Flexibility Upgrade》
 - 仓库：https://github.com/rockfox0/ai-usage-guard
-- 版本：v1.9（Phase 0–7 + Benchmark），versionCode 34
+- 版本：v1.9（Phase 0–7 + Benchmark），versionCode 35 / versionName 1.9
+- GitHub Release：https://github.com/rockfox0/ai-usage-guard/releases/tag/v1.9（含 APK）
 - 日期：2026-11-06
 
 ## 1. 交付概览
@@ -32,7 +33,7 @@
 | 7 主动分析 | 发现连续增长并给洞察 | InsightDetector + ProactiveAgent（每天 1 条、失败退化本地事实） | Benchmark Case 7；`InsightDetectorTest` |
 | 8 功能建议 | 具体、基于现有能力的提案 | FeatureAdvisor + propose_feature + list_feature_proposals | Benchmark Case 8 |
 
-Benchmark 运行：`./scripts/agent_bench.sh` → **8/8 PASS，约 51ms**（125 单测全绿）。
+Benchmark 运行：`./scripts/agent_bench.sh` → **8/8 PASS**；**135 个 JVM 单测全绿**。
 
 ## 3. 真机验证记录
 
