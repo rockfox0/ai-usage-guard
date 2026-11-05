@@ -2,6 +2,8 @@ package com.aid.usageguard.agent.runtime
 
 import android.content.Context
 import android.util.Log
+import com.aid.usageguard.agent.contract.AgentContext
+import com.aid.usageguard.agent.contract.AgentEvent
 import com.aid.usageguard.agent.contract.AgentOutcome
 import com.aid.usageguard.agent.contract.AgentRuntime
 import com.aid.usageguard.agent.executor.ToolExecutor
@@ -10,13 +12,19 @@ import com.aid.usageguard.agent.llm.LlmClientFactory
 import com.aid.usageguard.agent.llm.LlmException
 import com.aid.usageguard.agent.llm.LlmMessage
 import com.aid.usageguard.agent.llm.LlmResponse
+import com.aid.usageguard.agent.llm.LlmStreamUnavailableException
 import com.aid.usageguard.agent.llm.normalizeApiBase
 import com.aid.usageguard.agent.memory.AgentMemory
 import com.aid.usageguard.agent.tools.BehaviorTools
 import com.aid.usageguard.agent.tools.ControlTools
+import com.aid.usageguard.agent.tools.GuardTools
+import com.aid.usageguard.agent.tools.PendingActionTools
+import com.aid.usageguard.agent.tools.QuotaTools
 import com.aid.usageguard.agent.tools.ReportTools
 import com.aid.usageguard.agent.tools.RestrictionTools
 import com.aid.usageguard.agent.tools.ScoreTools
+import com.aid.usageguard.agent.tools.TaskScope
+import com.aid.usageguard.agent.tools.ToolKind
 import com.aid.usageguard.agent.tools.ToolRegistry
 import com.aid.usageguard.agent.tools.UsageTools
 import com.aid.usageguard.agent.tools.WhitelistTools
@@ -30,14 +38,24 @@ import com.aid.usageguard.data.settings.SettingsRepository
 import com.aid.usageguard.restriction.AppRestrictionController
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 真正的 Agent 运行时：LLM + Tool Calling 的多轮循环实现。
@@ -49,8 +67,13 @@ import java.net.UnknownHostException
  * 4. 继续下一轮，最多 [MAX_ROUNDS] 轮；轮次用尽则停止并返回已有信息；
  * 5. 返回统一结构 [AgentOutcome]，任何失败（无 Key / 网络 / HTTP / 解析）都返回 ok=false，绝不往上抛异常。
  *
- * 安全：模型只能调用 [ToolRegistry] 里注册过的 26 个本地工具（查询 / 评分 / 白名单 / App 控制 / 报告 / 通知），
- * 没有任何执行代码 / Shell / 任意文件读写的通道；工具只返回聚合数据，不把原始 UsageEvents 明细发给模型。
+ * 权限与预算（v1.7 方案 6.1 / 10.2）：
+ * - 每个任务带 [TaskScope]：报告 / 后台 / 洞察只能看见并执行只读工具，控制类工具由执行器独立拒绝；
+ * - 设置 / 限制类工具只生成待确认操作草案，用户确认后由本地 ActionExecutor 执行；
+ * - 单任务预算：模型请求 ≤6、工具调用 ≤12、墙钟 ≤180s，嵌套任务共享同一份预算。
+ *
+ * 安全：模型只能调用 [ToolRegistry] 里注册过的 34 个本地工具，没有任何执行代码 / Shell / 任意文件读写的通道；
+ * 工具只返回聚合数据，不把原始 UsageEvents 明细发给模型。
  */
 class AgentLoop(
     private val context: Context,
@@ -65,6 +88,9 @@ class AgentLoop(
 
     private val memory = AgentMemory(messageDao)
 
+    /** 当前任务 id（控制类工具把待确认草案归属到具体任务；任务结束恢复） */
+    private val currentTaskId = AtomicReference("")
+
     /** 工具白名单（唯一可被模型调用的本地能力集合） */
     private val registry = ToolRegistry(
         buildList {
@@ -72,7 +98,6 @@ class AgentLoop(
             addAll(BehaviorTools(behavior).all)
             addAll(ReportTools(usage, behavior, settings).all)
             addAll(RestrictionTools(restrictions, eventSource, usage, settings).all)
-            addAll(WhitelistTools(settings, eventSource, usage).all)
             addAll(
                 ControlTools(
                     context = context,
@@ -81,8 +106,13 @@ class AgentLoop(
                     reports = reports,
                     usage = usage,
                     source = eventSource,
+                    taskIdProvider = { currentTaskId.get() },
                 ).all,
             )
+            addAll(WhitelistTools(settings, eventSource, usage, taskIdProvider = { currentTaskId.get() }).all)
+            addAll(PendingActionTools().all)
+            addAll(QuotaTools(settings, eventSource, usage).all)
+            addAll(GuardTools(settings).all)
             addAll(ScoreTools().all)
         },
     )
@@ -97,6 +127,22 @@ class AgentLoop(
 
     /** 助手页可订阅的实时阶段（THINKING / CALLING_TOOL / 当前工具名），不参与对外契约。 */
     val state: StateFlow<AgentState> = _state.asStateFlow()
+
+    /** 统一回复事件（v1.7 方案 §8.1）：文本增量 / 工具状态 / 待确认操作 / 结束 / 取消。 */
+    private val _events = MutableSharedFlow<AgentEvent>(
+        replay = 0,
+        extraBufferCapacity = 256,
+    )
+
+    override val events: Flow<AgentEvent> = _events.asSharedFlow()
+
+    /** 当前活动任务的 Job（cancelCurrent 用；嵌套报告任务会临时覆盖并恢复） */
+    @Volatile
+    private var activeJob: Job? = null
+
+    private fun emitEvent(event: AgentEvent) {
+        if (!_events.tryEmit(event)) Log.w(TAG, "event dropped: ${event.javaClass.simpleName}")
+    }
 
     /** 已注册的工具名（供日志/调试） */
     val toolNames: Set<String> get() = registry.names
@@ -122,6 +168,7 @@ class AgentLoop(
                 systemPrompt = reportSystemPrompt(),
                 useMemory = false,
                 requireToolUse = true,
+                scope = TaskScope.REPORT,
             ),
         )
     }
@@ -142,11 +189,21 @@ class AgentLoop(
                 systemPrompt = reportSystemPrompt(),
                 useMemory = false,
                 requireToolUse = true,
+                scope = TaskScope.REPORT,
             ),
         )
     }
 
-    override suspend fun chat(sessionId: String, userInput: String): AgentOutcome {
+    /**
+     * 与用户对话。[context] 是页面来源 / 当前对话对象的**快照**（方案 §7），
+     * 只在本次任务的系统提示词里使用，任务执行期间不变；
+     * 用户后续明确换对象时由上层传新的 context。
+     */
+    override suspend fun chat(
+        sessionId: String,
+        userInput: String,
+        context: AgentContext?,
+    ): AgentOutcome {
         val input = userInput.trim()
         if (input.isEmpty()) {
             return AgentOutcome(
@@ -159,11 +216,27 @@ class AgentLoop(
             TaskRequest(
                 sessionId = sessionId.ifBlank { AgentMemory.DEFAULT_SESSION_ID },
                 prompt = input,
-                systemPrompt = chatSystemPrompt(),
+                systemPrompt = chatSystemPrompt(context),
                 useMemory = true,
                 requireToolUse = false,
+                scope = TaskScope.CHAT,
+                context = context,
             ),
         )
+    }
+
+    /**
+     * 取消当前前台任务：取消活动 Job 后，模型请求会被中断，后续工具调用与 UI 增量更新都会停止。
+     * 已经完成的工具操作如实保留（取消生成不等于回滚设置，方案 §8.2）。
+     */
+    override suspend fun cancelCurrent() {
+        val job = activeJob
+        if (job == null || !job.isActive) {
+            Log.d(TAG, "cancelCurrent: no active task")
+            return
+        }
+        Log.i(TAG, "cancelCurrent: cancelling active task")
+        job.cancel(CancellationException("cancelled by user"))
     }
 
     /**
@@ -184,8 +257,20 @@ class AgentLoop(
         val minutes = usedMinutes.coerceAtLeast(0L)
         val prompt = "用户已经连续使用「$name」$minutes 分钟了，请给一句提醒。"
 
+        // 后台提示也走统一预算（单次请求，主要保证墙钟上限与统计口径一致）
+        val budget = TaskBudget()
+        budget.tryConsumeModelRequest()?.let { reason ->
+            Log.w(TAG, "quickHint skipped: $reason")
+            return@withContext AgentOutcome(
+                text = "",
+                source = "AI",
+                ok = false,
+                elapsedMs = System.currentTimeMillis() - startedAt,
+            )
+        }
+
         try {
-            val response = withTimeoutOrNull(QUICK_HINT_TIMEOUT_MS) {
+            val response = withTimeoutOrNull(budget.timeoutForRequest(QUICK_HINT_TIMEOUT_MS)) {
                 client.complete(
                     system = hintSystemPrompt(prefs),
                     messages = listOf(LlmMessage.user(prompt)),
@@ -213,9 +298,63 @@ class AgentLoop(
     // 核心循环
     // ------------------------------------------------------------------
 
+    /**
+     * 任务入口：建立 / 复用根预算（嵌套报告子任务共享同一份），设置任务上下文，再跑主循环。
+     * 预算通过协程上下文传递，子任务不会重置额度（方案 §10.2）。
+     */
     private suspend fun executeTask(request: TaskRequest): AgentOutcome = withContext(Dispatchers.IO) {
         val startedAt = System.currentTimeMillis()
+        val inheritedBudget = currentCoroutineContext()[TaskBudget]
+        val budget = inheritedBudget ?: TaskBudget()
+        val taskId = "${request.sessionId.ifBlank { "task" }}@$startedAt"
+
+        coroutineScope {
+            // 任务在独立子 Job 里跑：cancelCurrent() 只取消这个 Job，不影响调用方（ViewModel / 报告任务）
+            val task = async {
+                val previousTaskId = currentTaskId.getAndSet(taskId)
+                try {
+                    // 预算放进上下文（嵌套任务复用同一实例，不会重置额度）
+                    // 嵌套任务（如 chat 内 generate_report_now 触发的报告）不对外发事件，
+                    // 避免把子任务的过程文本混进前台对话的流式输出。
+                    withContext(budget) {
+                        runTask(
+                            request = request,
+                            budget = budget,
+                            startedAt = startedAt,
+                            // 只让「前台对话的根任务」发事件：报告/后台任务（含 chat 内嵌套报告）都不发，
+                            // 避免后台任务污染助手页的流式输出。
+                            emitEvents = inheritedBudget == null && request.scope == TaskScope.CHAT,
+                        )
+                    }
+                } finally {
+                    currentTaskId.set(previousTaskId)
+                }
+            }
+            val previousJob = activeJob
+            activeJob = task
+            try {
+                // 取消（cancelCurrent / 调用方 Job 被取消）时 CancellationException 原样上抛：
+                // runTask 已 emit Cancelled 并更新状态，调用方（助手页）据此收尾，不再追加新内容。
+                task.await()
+            } finally {
+                if (activeJob === task) activeJob = previousJob
+            }
+        }
+    }
+
+    /** 主循环：模型（流式）→ 工具 → 模型，所有额度（请求/工具/墙钟）都从 [budget] 扣。 */
+    private suspend fun runTask(
+        request: TaskRequest,
+        budget: TaskBudget,
+        startedAt: Long,
+        emitEvents: Boolean,
+    ): AgentOutcome {
         _state.value = AgentState(sessionId = request.sessionId, phase = AgentPhase.THINKING)
+
+        /** 嵌套任务不发事件（只发根前台任务），避免污染前台流式输出 */
+        fun emit(event: AgentEvent) {
+            if (emitEvents) emitEvent(event)
+        }
         val usedTools = ArrayList<String>()
 
         val prefs = runCatching { settings.current() }.getOrDefault(AppSettings.DEFAULT)
@@ -231,39 +370,95 @@ class AgentLoop(
                 memory.appendUser(request.sessionId, request.prompt)
             }
 
+            val llm: LlmClient
             if (client == null) {
-                return@withContext fail(
+                val outcome = fail(
                     startedAt = startedAt,
                     usedTools = usedTools,
                     message = "尚未配置可用的模型接口：请在「设置 → AI 接口」里填写 BaseURL 与 API Key。",
                     source = "LOCAL",
                 )
+                emit(AgentEvent.Failed(outcome.text, "not_configured"))
+                return outcome
+            } else {
+                llm = client
             }
+
+            // 模型只能看到当前任务域允许的工具（REPORT/BACKGROUND/INSIGHT 只剩只读）
+            val visibleSpecs = registry.specs(request.scope)
+            // 取消后不再增量更新：onTextDelta 在回调线程里执行，需要自己检查任务 Job 是否还活着
+            val taskJob = currentCoroutineContext()[Job]
 
             var round = 0
             var finalText = ""
             var finalOk = false
             var nudged = false
+            var budgetStop: String? = null
+            /** 本任务是否已执行过副作用（草案 / 本地报告 / 通知）：只有无副作用时才允许流式降级 */
+            var sideEffectsPerformed = false
+
+            /** 一次流式模型请求（含超时与增量回调） */
+            suspend fun streamOnce(): LlmResponse =
+                withTimeoutOrNull(budget.timeoutForRequest(REQUEST_TIMEOUT_MS)) {
+                    llm.completeStream(
+                        system = request.systemPrompt,
+                        messages = messages,
+                        tools = visibleSpecs,
+                        maxTokens = null,
+                        onTextDelta = { delta ->
+                            if (taskJob?.isActive != false) emit(AgentEvent.TextDelta(delta))
+                        },
+                    )
+                } ?: throw LlmException("模型请求超时")
+
+            /** 非流式兜底（仅在流式不可用且本任务无副作用时使用一次） */
+            suspend fun nonStreamOnce(): LlmResponse =
+                withTimeoutOrNull(budget.timeoutForRequest(REQUEST_TIMEOUT_MS)) {
+                    llm.complete(request.systemPrompt, messages, visibleSpecs)
+                } ?: throw LlmException("模型请求超时")
 
             while (round < MAX_ROUNDS) {
+                currentCoroutineContext().ensureActive()
+
+                val requestStop = budget.tryConsumeModelRequest()
+                if (requestStop != null) {
+                    budgetStop = requestStop
+                    break
+                }
+
                 round++
                 _state.value = _state.value.copy(phase = AgentPhase.THINKING, round = round)
 
                 val response: LlmResponse = try {
-                    withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
-                        client.complete(request.systemPrompt, messages, registry.specs())
-                    } ?: throw LlmException("模型请求超时（${REQUEST_TIMEOUT_MS / 1000} 秒）")
+                    streamOnce()
                 } catch (e: LlmException) {
                     // 某些中转/上游在 thinking 模式下要求把历史 assistant 的思考内容原样回传，
-                    // 我们只持久化最终文本，无法满足时降级为「不带历史」重试一次，避免聊天直接失败。
+                    // 我们只持久化最终文本；降级为「不带历史」重试一次，重试同样计入预算。
                     val thinkingIssue = e.message?.contains("thinking", ignoreCase = true) == true
                     if (round == 1 && thinkingIssue) {
+                        val retryStop = budget.tryConsumeModelRequest()
+                        if (retryStop != null) {
+                            budgetStop = retryStop
+                            throw e
+                        }
                         Log.w(TAG, "upstream requires thinking echo, retrying without history", e)
                         messages.clear()
                         messages.add(LlmMessage.user(request.prompt))
-                        withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
-                            client.complete(request.systemPrompt, messages, registry.specs())
-                        } ?: throw e
+                        streamOnce()
+                    } else if (e is LlmStreamUnavailableException && !sideEffectsPerformed) {
+                        // 流式建连失败 / 不支持 / 空流：本任务还没有任何副作用，才允许降级一次非流式。
+                        // 流中途断线（LlmException）不走到这里 —— 断流绝不自动重放任务（方案 §8.2）。
+                        val retryStop = budget.tryConsumeModelRequest()
+                        if (retryStop != null) {
+                            budgetStop = retryStop
+                            throw e
+                        }
+                        Log.w(TAG, "streaming unavailable, fallback to non-streaming once: ${e.message}")
+                        val fallback = nonStreamOnce()
+                        if (fallback.text.isNotBlank()) {
+                            if (taskJob?.isActive != false) emit(AgentEvent.TextDelta(fallback.text))
+                        }
+                        fallback
                     } else {
                         throw e
                     }
@@ -295,15 +490,37 @@ class AgentLoop(
                     ),
                 )
 
+                var stoppedByBudget = false
                 for (call in response.toolCalls) {
+                    // 取消后立即停止后续工具调用（方案 §10.1）
+                    currentCoroutineContext().ensureActive()
+
+                    val toolStop = budget.tryConsumeToolCall()
+                    if (toolStop != null) {
+                        budgetStop = toolStop
+                        stoppedByBudget = true
+                        break
+                    }
+
                     _state.value = _state.value.copy(
                         phase = AgentPhase.CALLING_TOOL,
                         toolCalls = _state.value.toolCalls + call.name,
                     )
-                    val result = executor.execute(call, usedTools.size)
+                    emit(AgentEvent.ToolStarted(call.name, call.id))
+                    val result = executor.execute(
+                        call = call,
+                        usedCalls = usedTools.size,
+                        scope = request.scope,
+                        timeoutMsOverride = budget.timeoutForRequest(TOOL_TIMEOUT_MS),
+                    )
                     usedTools.add(call.name)
                     messages.add(LlmMessage.tool(result.callId, result.toolName, result.output))
+                    emitToolFinished(call.name, call.id, result.ok, result.output, emitEvents)
+                    if (result.ok && registry.find(call.name)?.kind?.let { it != ToolKind.QUERY } == true) {
+                        sideEffectsPerformed = true
+                    }
                 }
+                if (stoppedByBudget) break
 
                 if (round >= MAX_ROUNDS) {
                     // 轮次用尽：停止循环，把已经拿到的数据作为「已有信息」返回
@@ -312,28 +529,48 @@ class AgentLoop(
                 }
             }
 
-            val text = finalText.trim()
-            val ok = finalOk && text.isNotBlank()
+            var text = finalText.trim()
+            val budgetReason = budgetStop
+            val budgetExhausted = budgetReason != null
+            if (budgetReason != null) {
+                val note = "（本次任务已达到资源预算上限：$budgetReason。以上为已完成的部分结果。）"
+                text = if (text.isBlank()) note else "$text\n\n$note"
+            }
+            // 报告任务预算不足时返回 ok=false，让上层走本地规则报告；对话里则把部分结果正常展示
+            val ok = text.isNotBlank() && (
+                if (budgetExhausted) request.scope == TaskScope.CHAT else finalOk
+                )
+
             if (request.useMemory && text.isNotBlank()) {
                 runCatching { memory.appendAssistant(request.sessionId, text, usedTools.distinct()) }
             }
             _state.value = _state.value.finish(if (ok) AgentPhase.DONE else AgentPhase.FAILED)
 
-            AgentOutcome(
+            val outcome = AgentOutcome(
                 text = if (text.isNotBlank()) text else "模型没有返回可用内容，请稍后重试。",
                 source = "AI",
                 ok = ok,
                 toolCalls = usedTools.distinct(),
                 elapsedMs = System.currentTimeMillis() - startedAt,
             )
+            // 有可见文本（含轮次/预算用尽的部分结果）都按 Completed 收尾，UI 用它固定最终正文；
+            // 只有完全没有文本时才按 Failed 处理（显示错误而不是空回复）。
+            if (outcome.ok || outcome.text.isNotBlank()) {
+                emit(AgentEvent.Completed(outcome))
+            } else {
+                emit(AgentEvent.Failed(outcome.text.ifBlank { "模型没有返回可用内容，请稍后重试。" }, null))
+            }
+            return outcome
         } catch (e: CancellationException) {
-            // 用户取消 / ViewModel 清理：不能当成失败结果，继续向上抛
+            // 用户取消 / ViewModel 清理：不能当成失败结果；先发 Cancelled，再继续向上抛
             _state.value = _state.value.finish(AgentPhase.CANCELLED)
+            emit(AgentEvent.Cancelled)
             throw e
         } catch (e: Exception) {
             val message = "模型调用失败：${friendlyError(e)}"
             _state.value = _state.value.finish(AgentPhase.FAILED, message)
-            AgentOutcome(
+            emit(AgentEvent.Failed(message, null))
+            return AgentOutcome(
                 text = message,
                 source = "AI",
                 ok = false,
@@ -360,6 +597,38 @@ class AgentLoop(
         )
     }
 
+    /**
+     * 工具结束事件：成功时带一句可验证的摘要（工具的 message），失败时带错误；
+     * 若结果是「待确认草案」，额外发 [AgentEvent.ActionProposed] 让 UI 展示确认卡片。
+     */
+    private fun emitToolFinished(
+        toolName: String,
+        callId: String,
+        ok: Boolean,
+        output: String,
+        emitEvents: Boolean,
+    ) {
+        if (!emitEvents) return
+        val parsed = runCatching { JSONObject(output) }.getOrNull()
+        val message = parsed?.optString("message").orEmpty()
+        val error = parsed?.optString("error").orEmpty()
+        val summary = (if (ok) message else error).takeIf { it.isNotBlank() }?.take(160)
+        emitEvent(AgentEvent.ToolFinished(toolName, callId, ok, summary))
+        if (ok && parsed?.optBoolean("requiresConfirmation") == true) {
+            val opId = parsed.optString("opId")
+            val type = parsed.optString("type")
+            if (opId.isNotBlank() && type.isNotBlank()) {
+                emitEvent(
+                    AgentEvent.ActionProposed(
+                        opId = opId,
+                        type = type,
+                        message = summary ?: "已生成待确认操作，请在应用内确认。",
+                    ),
+                )
+            }
+        }
+    }
+
     /** 轮次用尽时的兜底文案：明确说明「已停止」，并带上最后一次工具结果。 */
     private fun fallbackFromTools(toolNames: List<String>, messages: List<LlmMessage>): String {
         val evidence = messages.lastOrNull { it.isToolResult }?.content.orEmpty()
@@ -384,17 +653,99 @@ class AgentLoop(
     // Prompt
     // ------------------------------------------------------------------
 
-    private suspend fun chatSystemPrompt(): String = systemPrompt(CHAT_SYSTEM)
+    private suspend fun chatSystemPrompt(context: AgentContext? = null): String =
+        systemPrompt(CHAT_SYSTEM, context)
 
-    private suspend fun reportSystemPrompt(): String = systemPrompt(REPORT_SYSTEM)
+    private suspend fun reportSystemPrompt(): String = systemPrompt(REPORT_SYSTEM, null)
 
-    /** 基础系统提示词 + 用户个性化 persona（称呼 / 语气 / 关注点 / 自定义要求） */
-    private suspend fun systemPrompt(base: String): String {
+    /** 基础系统提示词 + 页面/对话对象上下文快照 + 用户个性化 persona */
+    private suspend fun systemPrompt(base: String, context: AgentContext? = null): String {
         val prefs = runCatching { settings.current() }.getOrDefault(AppSettings.DEFAULT)
         return buildString {
             append(base.replace("%TODAY%", UsageEventSource.todayDate()))
+            val snapshot = runCatching { snapshotSection() }.getOrDefault("")
+            if (snapshot.isNotBlank()) append("\n\n").append(snapshot)
+            val section = contextSection(context)
+            if (section.isNotBlank()) append("\n\n").append(section)
             val persona = personaSection(prefs)
             if (persona.isNotBlank()) append("\n\n").append(persona)
+        }
+    }
+
+    /**
+     * 本地数据快照段（v1.8.2）：给 flash 这类小上下文模型一份「概览」，
+     * 减少无谓的工具往返；但明确标注「仅作概览，数值/排名/结论必须调工具核对」。
+     * 数据覆盖最近 30 天（更早数据不完整）。
+     */
+    private suspend fun snapshotSection(): String {
+        val usageRepo = com.aid.usageguard.data.Container.usage
+        val quotaRepo = com.aid.usageguard.data.Container.quota
+        val whitelistRepo = com.aid.usageguard.data.Container.whitelist
+        val prefs = settings.current()
+
+        val todayMinutes = runCatching { usageRepo.todayTotalMinutes() }.getOrDefault(0L)
+        val weekDays = runCatching { usageRepo.dailyTotalsForLastDays(7) }.getOrDefault(emptyList())
+        val monthDays = runCatching { usageRepo.dailyTotalsForLastDays(30) }.getOrDefault(emptyList())
+        val monthTop = runCatching {
+            usageRepo.rankingForRange(
+                UsageEventSource.dateOf(System.currentTimeMillis() - 29L * 24 * 60 * 60 * 1000),
+                UsageEventSource.todayDate(),
+                limit = 3,
+            )
+        }.getOrDefault(emptyList())
+        val whitelistQuota = runCatching { whitelistRepo.quota() }.getOrNull()
+
+        val budget = prefs.dailyTargetMinutes
+        val remaining = (budget - todayMinutes).coerceAtLeast(0L)
+        val weekAvg = weekDays.takeIf { it.isNotEmpty() }?.let { it.sumOf { d -> d.minutes } / it.size }
+        val monthAvg = monthDays.takeIf { it.isNotEmpty() }?.let { it.sumOf { d -> d.minutes } / it.size }
+
+        return buildString {
+            append("【本地数据快照（自动生成，仅作概览；具体数值/排名/结论必须调工具核对）】\n")
+            append("- 今天：已用 ").append(todayMinutes).append(" 分钟 / 每日额度 ").append(budget).append(" 分钟")
+            if (prefs.dailyBudgetEnforced && todayMinutes >= budget) append("（已超额，非白名单应用会被拦截）")
+            else append("（剩余 ").append(remaining).append(" 分钟）")
+            append('\n')
+            weekAvg?.let { append("- 近 7 天日均 ").append(it).append(" 分钟") }
+            monthAvg?.let { append("；近 30 天日均 ").append(it).append(" 分钟（有数据 ").append(monthDays.size).append(" 天）") }
+            append('\n')
+            if (monthTop.isNotEmpty()) {
+                append("- 近 30 天使用最多：")
+                append(monthTop.joinToString("、") { "${it.appName} ${it.minutes} 分钟" })
+                append('\n')
+            }
+            append("- 白名单 ").append(prefs.allowedPackages.size).append(" 个应用")
+            whitelistQuota?.let {
+                append("；").append(it.describe())
+            }
+            append('\n')
+            append("- 数据范围：可查询最近 30 天（单次分析超过 30 天请说明数据不完整）")
+            if (prefs.focusWindowEnabled) {
+                val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+                val active = com.aid.usageguard.domain.quota.FocusWindow.isActive(
+                    hour, prefs.focusWindowStart, prefs.focusWindowEnd,
+                )
+                append("\n- 专注时段：")
+                append(com.aid.usageguard.domain.quota.FocusWindow.label(prefs.focusWindowStart, prefs.focusWindowEnd))
+                append(if (active) "（当前生效中，只能用白名单应用）" else "（当前不在时段内）")
+            }
+        }
+    }
+
+    /**
+     * 页面上下文段（方案 §7）：只用 [AgentContext.describe] 的字段白名单，不带凭据；
+     * 明确告诉模型它只是「定位信息」，统计数值仍必须调用工具。
+     */
+    private fun contextSection(context: AgentContext?): String {
+        if (context == null || context.isEmpty()) return ""
+        val describe = context.describe()
+        if (describe.isBlank()) return ""
+        return buildString {
+            append("【本次对话上下文（快照，任务执行期间不变）】\n")
+            append("- ").append(describe).append('\n')
+            append("- 这些信息只用于定位对话对象（页面 / 应用 / 时间范围），不能作为统计数字的来源；")
+            append("涉及数值、排名、结论时必须调用对应工具查询后再回答。\n")
+            append("- 如果用户在本轮明确改变了对象（指定了别的应用或日期），以用户本轮说的为准。")
         }
     }
 
@@ -477,6 +828,10 @@ class AgentLoop(
         val useMemory: Boolean,
         /** 报告任务要求必须先调用工具，避免模型凭空编造 */
         val requireToolUse: Boolean,
+        /** 任务权限域：对话 / 报告 / 后台 / 洞察（决定工具可见集合与执行器允许集合） */
+        val scope: TaskScope = TaskScope.CHAT,
+        /** 页面来源 / 对话对象快照（只在 CHAT 使用，任务期间不变） */
+        val context: AgentContext? = null,
     )
 
     companion object {
@@ -489,8 +844,8 @@ class AgentLoop(
         /** 报告任务至少要用到的不同工具数（用于判断要不要再催模型一次） */
         private const val MIN_TOOLS_FOR_REPORT: Int = 3
 
-        /** 回放的对话轮数（user/assistant 条数） */
-        private const val MEMORY_TURNS: Int = 12
+        /** 回放的历史消息条数（user/assistant）：flash 模型上下文小，取 24 条并逐条截断 */
+        private const val MEMORY_TURNS: Int = 24
 
         private const val TAG = "AgentLoop"
 
@@ -517,29 +872,53 @@ class AgentLoop(
 
             必须遵守：
             1. 只根据工具返回的真实数据回答；数据不足时先调用工具查询，禁止编造具体数字。
-            2. 你不能执行代码或 Shell 命令，不能修改系统设置，也不能直接限制任何应用。
-               用户想限制某个应用时，只能调用 propose_restriction 给出建议，最终必须由用户在应用内确认。
-               白名单工具会真正修改用户设置：只有用户明确要求「把某应用加入 / 移出白名单」时才可调用 set_whitelist，
-               只是询问或让你给建议时不要调用；get_whitelist 可以随时查询。
+            2. 你不能执行代码或 Shell 命令，也不能直接改动系统设置或应用限制。
+               设置 / 限制 / 白名单 / 额度 / 限额 / 专注时段 / 同步类工具（set_* / set_app_restriction /
+               set_whitelist / set_app_daily_limit / set_daily_budget_enforced / set_focus_window /
+               set_whitelist_daily_limit / refresh_usage_data）
+               只会生成「待确认操作草案」，不会立即生效；你必须告诉用户「已生成待确认操作，请在应用内确认」，
+               不能声称已经改好，也不能自行确认（工具没有 confirmed 这类参数）。
+               用户只是询问或让你给建议时不要调用这些工具；查询请用 get_app_settings / get_whitelist 等只读工具。
             3. 不要索取或输出 API Key、原始使用事件明细等敏感信息。
             4. 用简洁、具体、可执行的中文回答；有多项内容时用短列表。
             5. 界面是手机窄屏：不要输出 Markdown 表格、分隔线或 HTML；用短段落和「- 」列表，
                需要强调数字时可以用 **加粗**。
             6. 你可以调控本 App 的设置（工具清单如下）。只有用户**明确要求修改**时才调用对应工具；
                用户只是询问或让你给建议时，先用 get_app_settings 查看，不要擅自修改。
+               注意：所有 set_* 类工具只会生成待确认草案（返回 opId），不会直接写入。
                · 每日目标 set_daily_target（30-1440 分钟）；勿扰时段 set_quiet_hours（0-23 点）
                · 通知总开关 set_notification_enabled；分渠道 set_notification_channels
                · 提醒风格 set_reminder_style（gentle/strict）；主题 set_theme_mode（system/light/dark）
                · 限制模式 set_restrict_mode（默认限制所有第三方应用 / 只限制指定应用）
                · 实时提示 set_nudge（开关 / 间隔 5-120 分钟 / 是否用 AI 写文案）
                · AI 个性化 set_ai_persona（称呼 / 语气 / 关注点 / 自定义要求）；AI 分析开关 set_ai_analysis_enabled
-               · 应用白名单 get_whitelist / set_whitelist；应用限制 set_app_restriction（真正限制 / 放行）
-               · 数据与报告 refresh_usage_data / generate_report_now；通知自检 send_test_notification
+               · 应用白名单 get_whitelist / set_whitelist（草案）；应用限制 set_app_restriction（草案）
+               · 全局每日额度拦截 set_daily_budget_enforced（草案：配合「每日目标」分钟数，超限后拦非白名单应用）
+               · 单应用每日限额 set_app_daily_limit（草案：minutes 0-1440，0=取消；超限单独拦该应用，优先于白名单）
+               · 额度状态 get_quota_status（只读：今日额度/已用/剩余、是否启用拦截、各应用限额与是否超限）
+               · 近 30 天趋势 get_usage_trend（days 1-30；总量/日均、每日明细、Top 应用、周环比）
+               · 专注时段 set_focus_window（草案：时段内只能用白名单，与额度无关，支持跨午夜）
+               · 白名单每日添加上限 set_whitelist_daily_limit（草案：0-20，0=不限）
+               · 单应用 30 天历史 get_app_usage_history（days 1-30）
+               · 待确认操作 get_pending_actions（只读：查看还有哪些草案没确认、参数与过期时间）
+               · 数据与报告：refresh_usage_data 只生成同步草案；generate_report_now 直接生成本地报告
+               · 通知自检 send_test_notification（直接发送，无需确认）
             7. 执行修改前若用户意图不明确（没说清数值、应用或时间），先问清楚再调用；
-               修改成功后用一句话回显「旧值 → 新值」（工具返回的 changed 字段），不要罗列长清单。
+               生成草案后用一句话说明「将要改什么（旧值 → 新值）」（工具返回的 changed 字段），
+               并提示用户在应用内确认；不要罗列长清单，也不要承诺已经生效。
             8. 用户问「今天表现怎么样 / 打了多少分 / 这周怎么样 / 最近状态」时，先调用 get_usage_score
                （今天用 scope=today，最近一周用 scope=week）；回答必须引用具体分数、等级和一句词条（headline），
                再给 1-2 条具体建议，不要只凭感觉评价。
+            9. 用户问「今天还剩多少额度 / 有没有超额度 / 哪个应用快到限额了」时，先调用 get_quota_status，
+               引用返回的真实数字（每日额度、已用、剩余、各应用限额与是否超限）；不要凭印象估算。
+               需要修改额度或限额时：全局额度用 set_daily_target（分钟数）+ set_daily_budget_enforced（是否拦截），
+               单应用限额用 set_app_daily_limit；它们都只生成待确认草案，必须提示用户在应用内确认。
+               说明「白名单应用不受全局额度限制，但单应用限额优先于白名单」这条规则。
+            10. 用户问「最近 30 天 / 这个月怎么样 / 趋势」时，先调用 get_usage_trend（days 1-30），
+               引用总量、日均、每日明细、Top 应用与周环比；数据不足时说明「更早数据不完整」，不要补零编造。
+               专注时段用 set_focus_window（草案，时段内只能用白名单，与额度无关，支持跨午夜）；
+               白名单每天能加几个用 set_whitelist_daily_limit（草案，0=不限）；
+               get_whitelist / get_quota_status 会返回今天还能加几个白名单。
 
             今天的日期是 %TODAY%。
         """.trimIndent()
@@ -554,12 +933,17 @@ class AgentLoop(
                【值得注意】……
                【建议】……
             3. 语气克制、不说教，不把正常使用直接判定为沉迷；建议要具体、可执行。
-            4. 你不能执行代码或 Shell，也不能直接限制应用；需要限制时只提建议。
-               写报告过程中不要调用任何会修改状态的控制类工具（set_* / set_app_restriction /
-               refresh_usage_data / generate_report_now / send_test_notification），只读工具可用。
+            4. 你不能执行代码或 Shell，也不能直接限制应用；需要限制时只写在建议里。
+               报告任务只有只读工具可用：set_* / set_whitelist / set_app_restriction / set_app_daily_limit /
+               set_daily_budget_enforced / set_focus_window / set_whitelist_daily_limit / refresh_usage_data /
+               generate_report_now / send_test_notification 在本任务中不可用（执行器也会拒绝），不要尝试调用。
+               额度相关只能读：get_quota_status（今日额度/已用/剩余、各应用限额、专注时段、白名单每日额度）。
             5. 界面是手机窄屏：不要输出 Markdown 表格、分隔线或 HTML；用短段落和「- 」列表。
             6. 生成报告前先调用 get_usage_score：日报用 scope=today、周报用 scope=week；
                把分数、等级与词条（headline）写到报告开头（例如「今日 82 分（良好）· 节奏不错」），再展开三段内容。
+            7. 报告涉及额度时（例如「建议把每日额度调到 X 分钟」「某个应用要设限额」），
+               可以先调用 get_quota_status 读取真实额度与限额数据再写建议；不要编造额度数字。
+            8. 需要更长周期趋势时用 get_usage_trend（days 1-30，只读）；数据不足时说明「更早数据不完整」，不要补零。
 
             今天的日期是 %TODAY%。
         """.trimIndent()

@@ -21,6 +21,8 @@ data class UsageSnapshot(
     val launchCount: Int,
     val slots: Map<TimeSlot, Long>,
     val topApps: List<Pair<String, Long>> = emptyList(),
+    /** VALID / PARTIAL / NO_PERMISSION / NOT_SYNCED / FAILED，见 DataStatus */
+    val dataStatus: String = "VALID",
 )
 
 /** 打分/词条的个性化参数 */
@@ -45,6 +47,10 @@ data class UsageScore(
     val launchCount: Int,
     val slots: List<SlotMinutes>,
     val topApps: List<Pair<String, Long>> = emptyList(),
+    /** 评分数据状态；非 VALID 时 [scoreAvailable] 可能为 false */
+    val dataStatus: String = "VALID",
+    /** 数据不足时不应展示分数（方案 4.4） */
+    val scoreAvailable: Boolean = true,
 ) {
     val targetRatio: Double
         get() = if (targetMinutes > 0) totalMinutes.toDouble() / targetMinutes else 0.0

@@ -23,7 +23,17 @@ class ToolRegistry(tools: List<AgentTool>) {
 
     fun find(name: String): AgentTool? = byName[name]
 
-    fun specs(): List<LlmToolSpec> = tools.map { tool ->
-        LlmToolSpec(name = tool.name, description = tool.description, parameters = tool.parameters)
-    }
+    /** 所有工具的 schema（不做 scope 过滤，仅供调试） */
+    fun specs(): List<LlmToolSpec> = tools.map { tool -> tool.toSpec() }
+
+    /** 按任务权限域过滤后的工具 schema（发给模型的就是这一份） */
+    fun specs(scope: TaskScope): List<LlmToolSpec> =
+        ToolScopePolicy.visible(tools, scope).map { tool -> tool.toSpec() }
+
+    /** 执行器用：该工具在当前任务域是否允许执行 */
+    fun allows(toolName: String, scope: TaskScope): Boolean =
+        find(toolName)?.let { ToolScopePolicy.allows(scope, it.kind) } ?: false
+
+    private fun AgentTool.toSpec(): LlmToolSpec =
+        LlmToolSpec(name = name, description = description, parameters = parameters)
 }

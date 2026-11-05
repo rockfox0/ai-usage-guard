@@ -4,12 +4,13 @@ import com.aid.usageguard.data.UsageEventSource
 import com.aid.usageguard.data.repo.UsageRepository
 import com.aid.usageguard.data.settings.SettingsRepository
 import com.aid.usageguard.domain.model.AppUsageSummary
+import com.aid.usageguard.domain.model.DailyTotal
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 使用数据查询工具组（5 个）：
- * get_daily_usage / get_weekly_usage / get_usage_ranking / get_app_usage_history / get_user_preferences。
+ * 使用数据查询工具组（6 个）：
+ * get_daily_usage / get_weekly_usage / get_usage_ranking / get_app_usage_history / get_usage_trend / get_user_preferences。
  *
  * 只暴露聚合结果（时长、次数、排行榜），不把原始 UsageEvents 明细发给模型。
  */
@@ -24,6 +25,7 @@ class UsageTools(
         WeeklyUsageTool(),
         RankingTool(),
         AppHistoryTool(),
+        UsageTrendTool(),
         UserPreferencesTool(),
     )
 
@@ -34,7 +36,7 @@ class UsageTools(
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
-                "date" to JsonSchema.string("日期，yyyy-MM-dd，缺省为今天"),
+                "date" to JsonSchema.string("日期，yyyy-MM-dd，缺省为今天", format = "date"),
             ),
         )
 
@@ -110,7 +112,7 @@ class UsageTools(
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
-                "date" to JsonSchema.string("日期，yyyy-MM-dd，缺省为今天"),
+                "date" to JsonSchema.string("日期，yyyy-MM-dd，缺省为今天", format = "date"),
                 "limit" to JsonSchema.integer("返回条数，1-20，缺省 10", minimum = 1, maximum = 20),
             ),
         )
@@ -135,13 +137,15 @@ class UsageTools(
     private inner class AppHistoryTool : AgentTool {
         override val name: String = "get_app_usage_history"
         override val description: String =
-            "查询某个 App 最近几天的使用历史（今天/本周时长、日均、每日明细、今天打开次数）。" +
-                "package_name 可以是包名（com.tencent.mm），也可以是应用名（微信）。"
+            "查询某个应用最近 1-30 天的使用历史：今天/本周时长、日均、每日明细、今天打开次数。"
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
-                "package_name" to JsonSchema.string("应用包名或应用名，例如 com.tencent.mm / 微信"),
-                "days" to JsonSchema.integer("查询最近几天，1-7，缺省 7", minimum = 1, maximum = 7),
+                "package_name" to JsonSchema.string(
+                    "应用包名或应用名，例如 com.tencent.mm / 微信",
+                    format = "app_ref",
+                ),
+                "days" to JsonSchema.integer("查询最近几天，1-30，缺省 7", minimum = 1, maximum = 30),
             ),
             required = listOf("package_name"),
         )
@@ -151,9 +155,11 @@ class UsageTools(
                 ?: throw ToolArgumentException("缺少必填参数 package_name（包名或应用名）")
             val packageName = resolvePackageName(usage, source, input)
                 ?: throw ToolArgumentException("没有找到应用「$input」。可以先用 get_usage_ranking 查准确的包名。")
-            val days = (arguments.intArg("days") ?: 7).coerceIn(1, 7)
+            val days = (arguments.intArg("days") ?: 7).coerceIn(1, 30)
             val detail = usage.appDetail(packageName)
                 ?: throw ToolArgumentException("没有查到「$input」的使用记录")
+            val daily = if (days <= 7) detail.daily.takeLast(days) else dailyForApp(packageName, days)
+            val windowTotal = daily.sumOf { it.minutes }
 
             return JSONObject().apply {
                 put("packageName", packageName)
@@ -168,8 +174,11 @@ class UsageTools(
                 put("launchCountToday", detail.launchCount)
                 put("lastUsed", detail.lastUsed)
                 put("lastUsedText", ToolFormat.timeOfDay(detail.lastUsed))
+                put("windowTotalMinutes", windowTotal)
+                put("windowTotalText", ToolFormat.minutes(windowTotal))
+                put("windowAverageMinutes", if (daily.isEmpty()) 0L else windowTotal / daily.size)
                 put("daily", JSONArray().apply {
-                    detail.daily.takeLast(days).forEach { day ->
+                    daily.forEach { day ->
                         put(JSONObject().apply {
                             put("date", day.date)
                             put("label", UsageEventSource.dayLabel(day.date))
@@ -181,6 +190,104 @@ class UsageTools(
                 put("sessionCountToday", detail.sessions.size)
             }
         }
+    }
+
+    private inner class UsageTrendTool : AgentTool {
+        override val name: String = "get_usage_trend"
+        override val description: String =
+            "查询最近 N 天（1-30）使用趋势：总量/日均、每日明细、Top 应用、周环比；缺数据会标注，不补零。"
+
+        override val parameters: JSONObject = JsonSchema.objectSchema(
+            properties = listOf(
+                "days" to JsonSchema.integer("统计最近几天，1-30，缺省 30", minimum = 1, maximum = 30),
+            ),
+        )
+
+        override suspend fun execute(arguments: JSONObject): JSONObject {
+            val days = (arguments.intArg("days") ?: 30).coerceIn(1, 30)
+            val today = UsageEventSource.todayDate()
+            val from = UsageEventSource.dateOf(
+                System.currentTimeMillis() - (days - 1).toLong() * UsageEventSource.DAY_MS,
+            )
+            val totals = usage.dailyTotalsForLastDays(days)
+            val total = totals.sumOf { it.minutes }
+            val validDays = totals.size
+            val missingDays = (days - validDays).coerceAtLeast(0)
+            val average = if (validDays > 0) total / validDays else 0L
+            val peak = totals.maxByOrNull { it.minutes }
+            val lowest = totals.minByOrNull { it.minutes }
+            val ranking = usage.rankingForRange(from, today, limit = 10)
+
+            // 周环比：最近 7 天 vs 前 7 天；不足 14 天/前 7 天为 0 时返回 null
+            val recentFrom = UsageEventSource.dateOf(
+                System.currentTimeMillis() - 6L * UsageEventSource.DAY_MS,
+            )
+            val prevFrom = UsageEventSource.dateOf(
+                System.currentTimeMillis() - 13L * UsageEventSource.DAY_MS,
+            )
+            val recent7 = totals.filter { it.date >= recentFrom }.sumOf { it.minutes }
+            val prev7 = totals
+                .filter { it.date >= prevFrom && it.date < recentFrom }
+                .sumOf { it.minutes }
+            val wowPercent: Int? =
+                if (prev7 > 0) ((recent7 - prev7) * 100.0 / prev7).toInt() else null
+
+            return JSONObject().apply {
+                put("days", days)
+                put("from", from)
+                put("to", today)
+                put("totalMinutes", total)
+                put("totalText", ToolFormat.minutes(total))
+                put("averageMinutes", average)
+                put("averageText", ToolFormat.minutes(average))
+                put("validDays", validDays)
+                put("missingDays", missingDays)
+                put("peakDay", dayJson(peak))
+                put("lowestDay", dayJson(lowest))
+                put("byDay", JSONArray().apply {
+                    totals.forEach { day ->
+                        put(JSONObject().apply {
+                            put("date", day.date)
+                            put("label", UsageEventSource.dayLabel(day.date))
+                            put("minutes", day.minutes)
+                            put("minutesText", ToolFormat.minutes(day.minutes))
+                        })
+                    }
+                })
+                put("topApps", ranking.toJson(limit = 10, total = total))
+                put("weekOverWeekChangePercent", wowPercent ?: JSONObject.NULL)
+                put("last7DaysMinutes", recent7)
+                put("previous7DaysMinutes", prev7)
+                if (missingDays > 0) {
+                    put(
+                        "note",
+                        "最近 $days 天里有 $missingDays 天没有可用记录（更早数据可能不完整），" +
+                            "统计只基于有效 $validDays 天，未补零。",
+                    )
+                }
+            }
+        }
+
+        private fun dayJson(day: DailyTotal?): JSONObject = JSONObject().apply {
+            put("date", day?.date ?: "")
+            put("minutes", day?.minutes ?: 0L)
+            put("minutesText", ToolFormat.minutes(day?.minutes ?: 0L))
+        }
+    }
+
+    /** 单应用最近 days 天（≤30）的每日分钟数：无记录补 0（与 appDetail 的 7 天行为一致） */
+    private suspend fun dailyForApp(packageName: String, days: Int): List<DailyTotal> {
+        val today = UsageEventSource.todayDate()
+        val result = ArrayList<DailyTotal>(days)
+        for (offset in (days - 1) downTo 0) {
+            val date = UsageEventSource.addDays(today, -offset)
+            val minutes = runCatching { usage.rankingForDate(date) }
+                .getOrDefault(emptyList())
+                .firstOrNull { it.packageName == packageName }
+                ?.minutes ?: 0L
+            result.add(DailyTotal(date, minutes))
+        }
+        return result
     }
 
     private inner class UserPreferencesTool : AgentTool {

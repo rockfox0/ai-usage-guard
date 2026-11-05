@@ -4,7 +4,9 @@ import android.Manifest
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -13,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,9 +23,15 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -35,6 +44,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -44,6 +54,10 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aid.usageguard.data.settings.AppSettings
+import com.aid.usageguard.domain.quota.FocusWindow
+import com.aid.usageguard.domain.quota.QuotaPolicy
+import com.aid.usageguard.restriction.RestrictionMode
+import com.aid.usageguard.ui.actions.PendingActionsCard
 import com.aid.usageguard.notify.NotificationHelper
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
@@ -57,8 +71,14 @@ fun SettingsScreen() {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val permissions by vm.permissionState.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
+    val quotaUsed by vm.quotaUsedMinutes.collectAsStateWithLifecycle()
+    val whitelistQuota by vm.whitelistQuota.collectAsStateWithLifecycle()
 
-    LaunchedEffect(Unit) { vm.refreshPermissions() }
+    LaunchedEffect(Unit) {
+        vm.refreshPermissions()
+        vm.refreshQuotaUsage()
+        vm.refreshWhitelistQuota()
+    }
 
     // 以 DataStore 的值为 key 初始化：保存后自动同步，用户输入期间不会被覆盖
     var baseUrl by remember(settings.aiBaseUrl) { mutableStateOf(settings.aiBaseUrl) }
@@ -133,6 +153,9 @@ fun SettingsScreen() {
             }
         }
 
+        // 待确认操作（AI 生成的修改草案：确认后才真正生效；空态时这张卡片不渲染）
+        item(key = "pending_actions") { PendingActionsCard() }
+
         // 权限
         item {
             SettingsCard(title = "权限状态") {
@@ -169,20 +192,51 @@ fun SettingsScreen() {
             }
         }
 
-        // 限制模式
+        // 限制模式（v1.8.1：三选一，替代旧的「默认限制」开关）
         item {
             SettingsCard(title = "限制模式") {
-                ToggleRow(
-                    label = "默认限制第三方应用（系统应用与白名单除外）",
-                    checked = settings.restrictByDefault,
-                    onChange = vm::setRestrictByDefault,
-                )
+                val currentMode = RestrictionMode.parse(settings.restrictionMode)
+                RestrictionMode.entries.forEach { mode ->
+                    val selected = mode == currentMode
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { if (!selected) vm.setRestrictionMode(mode) }
+                            .padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        RadioButton(
+                            selected = selected,
+                            onClick = { if (!selected) vm.setRestrictionMode(mode) },
+                        )
+                        Column(modifier = Modifier.weight(1f).padding(top = 10.dp)) {
+                            Text(
+                                text = mode.label,
+                                fontSize = 13.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                            if (selected) {
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    text = mode.description,
+                                    fontSize = 11.sp,
+                                    color = colors.onSurfaceVariant,
+                                    lineHeight = 16.sp,
+                                )
+                            }
+                        }
+                    }
+                }
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    if (settings.restrictByDefault) {
-                        "已开启：除「白名单」与系统应用（含电话/短信/设置/桌面/输入法/系统导航）外，用户安装的第三方应用打开即被拦截。在「应用」页把开关打开可标记为「允许」。"
-                    } else {
-                        "已关闭：只有你在「应用」页手动打开「暂停」的应用会被拦截。"
+                    text = when (currentMode) {
+                        RestrictionMode.QUOTA_AFTER_BUDGET ->
+                            "当前：额度内所有应用都能正常用；今天总使用达到 ${settings.dailyTargetMinutes} 分钟后，只有白名单（与系统应用）还能打开。"
+                        RestrictionMode.ALWAYS_NON_WHITELIST ->
+                            "当前：不在白名单里的第三方应用一打开就被拦截（与额度无关）。"
+                        RestrictionMode.MANUAL_ONLY ->
+                            "当前：只有你在「应用」页手动标记为受限的应用会被拦截。"
                     },
                     fontSize = 11.sp,
                     color = colors.onSurfaceVariant,
@@ -192,6 +246,150 @@ fun SettingsScreen() {
                 Text(
                     "白名单：${settings.allowedPackages.size} 个应用 · 每个应用每天可用 1 次「临时使用 1 分钟」",
                     fontSize = 11.sp,
+                    color = colors.primary,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "单应用每日限额在「应用详情 → 每日限额」设置，任何模式下都独立生效；系统关键应用永不被拦截。",
+                    fontSize = 10.sp,
+                    color = colors.onSurfaceVariant,
+                    lineHeight = 15.sp,
+                )
+            }
+        }
+
+        // 每日使用额度（v1.8：全局额度 + 拦截开关）
+        item {
+            SettingsCard(title = "每日使用额度") {
+                val budget = settings.dailyTargetMinutes
+                val remaining = QuotaPolicy.remainingMinutes(budget, quotaUsed ?: 0L)
+                Text(
+                    text = if (quotaUsed != null) {
+                        "今日已用 ${quotaUsed} / $budget 分钟 · 剩余 $remaining 分钟"
+                    } else {
+                        "当前额度：$budget 分钟／天（今日用量读取中…）"
+                    },
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                Spacer(Modifier.height(6.dp))
+                ToggleRow(
+                    label = "超出额度后拦截非白名单应用",
+                    checked = settings.dailyBudgetEnforced,
+                    onChange = vm::setDailyBudgetEnforced,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = if (settings.dailyBudgetEnforced) {
+                        "已开启：今天总使用超过 $budget 分钟后，除白名单与系统应用外都会被拦截。"
+                    } else {
+                        "已关闭：全局额度只用于提醒，不会拦截应用。"
+                    },
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 17.sp,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "白名单与系统应用不受全局额度限制；在「应用详情 → 每日限额」里给单个应用设的限额优先于白名单，超了同样会拦截。",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 17.sp,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "额度分钟数可在下方「每日使用目标」中调整。",
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+
+        // 专注时段（v1.8.2）
+        item {
+            SettingsCard(title = "专注时段") {
+                val nowHour = remember(settings.focusWindowStart, settings.focusWindowEnd) {
+                    java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+                }
+                val focusLabel = FocusWindow.label(settings.focusWindowStart, settings.focusWindowEnd)
+                val active = settings.focusWindowEnabled &&
+                    FocusWindow.isActive(nowHour, settings.focusWindowStart, settings.focusWindowEnd)
+                ToggleRow(
+                    label = "时段内只能用白名单应用",
+                    checked = settings.focusWindowEnabled,
+                    onChange = { enabled ->
+                        vm.setFocusWindow(enabled, settings.focusWindowStart, settings.focusWindowEnd)
+                    },
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "$focusLabel · ${if (active) "当前生效中" else "未生效"}",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = if (active) colors.primary else colors.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    HourSelector(
+                        label = "开始",
+                        hour = settings.focusWindowStart,
+                        onPick = { hour ->
+                            vm.setFocusWindow(settings.focusWindowEnabled, hour, settings.focusWindowEnd)
+                        },
+                    )
+                    HourSelector(
+                        label = "结束",
+                        hour = settings.focusWindowEnd,
+                        onPick = { hour ->
+                            vm.setFocusWindow(settings.focusWindowEnabled, settings.focusWindowStart, hour)
+                        },
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "与额度无关：时段内非白名单应用会被直接拦截，系统关键应用不受影响。" +
+                        "支持跨午夜（例如 22:00-07:00）；起止相同表示全天生效。",
+                    fontSize = 11.sp,
+                    color = colors.onSurfaceVariant,
+                    lineHeight = 17.sp,
+                )
+            }
+        }
+
+        // 白名单每日添加上限（v1.8.2）
+        item {
+            SettingsCard(title = "白名单每日添加上限") {
+                val quota = whitelistQuota
+                Text(
+                    text = when {
+                        quota == null -> "今日已添加 — 个"
+                        quota.unlimited -> "今日已添加 ${quota.used} 个 · 添加次数不限"
+                        else -> "今日已添加 ${quota.used} 个 · 还可添加 ${quota.remaining} 个"
+                    },
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(1, 2, 3, 0).forEach { limit ->
+                        FilterChip(
+                            selected = settings.whitelistDailyLimit == limit,
+                            onClick = { vm.setWhitelistDailyLimit(limit) },
+                            label = { Text(if (limit == 0) "不限" else "$limit 个", fontSize = 11.sp) },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "每天最多能把 N 个新应用加入白名单（默认 1 个）；移出白名单、重复添加不占用次数，跨天自动重置。",
+                    fontSize = 11.sp,
+                    color = colors.onSurfaceVariant,
+                    lineHeight = 17.sp,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "白名单 = 额度用完后仍可用、专注时段内也可用的应用。",
+                    fontSize = 10.sp,
                     color = colors.primary,
                 )
             }
@@ -527,6 +725,42 @@ fun SettingsScreen() {
                     color = colors.onSurfaceVariant,
                     lineHeight = 17.sp,
                 )
+            }
+        }
+    }
+}
+
+/** 小时选择器（0-23），用于专注时段的开始/结束小时 */
+@Composable
+private fun HourSelector(label: String, hour: Int, onPick: (Int) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val colors = MaterialTheme.colorScheme
+    Column {
+        Text(label, fontSize = 11.sp, color = colors.onSurfaceVariant)
+        Spacer(Modifier.height(2.dp))
+        Box {
+            FilterChip(
+                selected = true,
+                onClick = { expanded = true },
+                label = { Text("%02d:00".format(hour), fontSize = 11.sp) },
+                trailingIcon = {
+                    Icon(
+                        imageVector = Icons.Filled.ArrowDropDown,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                    )
+                },
+            )
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                (0..23).forEach { h ->
+                    DropdownMenuItem(
+                        text = { Text("%02d:00".format(h), fontSize = 12.sp) },
+                        onClick = {
+                            expanded = false
+                            onPick(h)
+                        },
+                    )
+                }
             }
         }
     }

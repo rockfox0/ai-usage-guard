@@ -20,8 +20,14 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.aid.usageguard.data.Container
+import com.aid.usageguard.data.UsageEventSource
+import com.aid.usageguard.restriction.RestrictionMode
 import com.aid.usageguard.restriction.RestrictionPolicy
 import com.aid.usageguard.restriction.RuleValidator
+import com.aid.usageguard.domain.quota.FocusWindow
+import com.aid.usageguard.domain.quota.QuotaPolicy
+import com.aid.usageguard.domain.quota.QuotaReason
+import com.aid.usageguard.domain.quota.QuotaState
 import com.aid.usageguard.restriction.TempAllowStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -57,12 +63,41 @@ class GuardService : AccessibilityService() {
     private var allowedPackages: Set<String> = emptySet()
 
     @Volatile
-    private var restrictByDefault: Boolean = true
+    private var restrictByDefault: Boolean = false
+
+    @Volatile
+    private var restrictionMode: RestrictionMode = RestrictionMode.QUOTA_AFTER_BUDGET
 
     @Volatile
     private var protectedPackages: Set<String> = emptySet()
 
     private val tempAllowStore by lazy { TempAllowStore(this) }
+
+    // ---- 时长额度（v1.8）：全局每日额度 + 单应用每日限额 ----
+    @Volatile
+    private var dailyBudgetEnforced = true
+
+    @Volatile
+    private var dailyBudgetMinutes = 300
+
+    @Volatile
+    private var appLimits: Map<String, Int> = emptyMap()
+
+    // ---- 专注时段（v1.8.2）：时段内只允许白名单应用 ----
+    @Volatile
+    private var focusWindowEnabled = false
+
+    @Volatile
+    private var focusWindowStart = 22
+
+    @Volatile
+    private var focusWindowEnd = 7
+
+    private var quotaDate: String = ""
+    private var quotaTotalMs: Long = 0L
+    private val quotaPerAppMs = HashMap<String, Long>()
+    private var quotaLastPkg: String? = null
+    private var quotaLastAt: Long = 0L
 
     // ---- 实时提示（陪伴模式） ----
     private var foregroundPkg: String? = null
@@ -73,9 +108,19 @@ class GuardService : AccessibilityService() {
     private var nudgeIntervalMinutes = 15
     private var nudgeUseAi = false
 
+    private var tickCount = 0
     private val nudgeTicker = object : Runnable {
         override fun run() {
+            runCatching { creditQuota() }
+            runCatching { enforceQuotaMidSession() }
             runCatching { maybeNudge() }
+            // 每 60 秒刷新一次单应用限额（AI/页面修改后无需重启服务）
+            tickCount++
+            if (tickCount % 3 == 0) {
+                scope.launch {
+                    runCatching { appLimits = Container.quota.limits() }
+                }
+            }
             handler.postDelayed(this, 20_000L)
         }
     }
@@ -102,15 +147,35 @@ class GuardService : AccessibilityService() {
                 Container.restrictions.observeBlocked().collect { explicitBlocked = it }
             }.onFailure { Log.e(TAG, "observe restrictions failed", it) }
         }
+        // 额度基线：今天已用总时长 + 各应用时长 + 单应用限额
+        scope.launch {
+            runCatching {
+                quotaDate = UsageEventSource.todayDate()
+                val snapshot = Container.quota.todayUsage()
+                quotaTotalMs = snapshot.totalMinutes * 60_000L
+                quotaPerAppMs.clear()
+                snapshot.perAppMinutes.forEach { (pkg, minutes) ->
+                    quotaPerAppMs[pkg] = minutes * 60_000L
+                }
+                appLimits = Container.quota.limits()
+                Log.i(TAG, "quota baseline total=${snapshot.totalMinutes}m apps=${quotaPerAppMs.size} limits=${appLimits.size}")
+            }.onFailure { Log.e(TAG, "quota baseline failed", it) }
+        }
         handler.postDelayed(nudgeTicker, 20_000L)
         scope.launch {
             runCatching {
                 Container.settings.settings.collect { settings ->
                     allowedPackages = settings.allowedPackages
                     restrictByDefault = settings.restrictByDefault
+                    restrictionMode = RestrictionMode.parse(settings.restrictionMode)
                     nudgeEnabled = settings.realtimeNudgeEnabled
                     nudgeIntervalMinutes = settings.nudgeIntervalMinutes.coerceIn(1, 120)
                     nudgeUseAi = settings.nudgeUseAi
+                    dailyBudgetEnforced = settings.dailyBudgetEnforced
+                    dailyBudgetMinutes = settings.dailyTargetMinutes
+                    focusWindowEnabled = settings.focusWindowEnabled
+                    focusWindowStart = settings.focusWindowStart
+                    focusWindowEnd = settings.focusWindowEnd
                 }
             }.onFailure { Log.e(TAG, "observe settings failed", it) }
         }
@@ -125,24 +190,35 @@ class GuardService : AccessibilityService() {
         val isSystemUi = pkg == "com.android.systemui" || pkg.contains("systemui")
         lastForegroundPkg = pkg
 
-        val blocked = RestrictionPolicy.isRestricted(
+        creditQuota(pkg)
+        resetQuotaIfNewDay()
+
+        // 限制模式：
+        // - QUOTA_AFTER_BUDGET：额度内所有应用都放行，只按「手动限制」判断，超额交给 QuotaPolicy；
+        // - ALWAYS_NON_WHITELIST：始终拦非白名单；
+        // - MANUAL_ONLY：只拦手动指定。
+        val alwaysBlockNonWhitelist = restrictionMode == RestrictionMode.ALWAYS_NON_WHITELIST
+        val ruleBlocked = RestrictionPolicy.isRestricted(
             packageName = pkg,
             allowedPackages = allowedPackages,
             explicitBlocked = explicitBlocked,
-            restrictByDefault = restrictByDefault,
+            restrictByDefault = alwaysBlockNonWhitelist,
             protectedPackages = protectedPackages,
         )
+        val quota = quotaState(pkg)
+        val blocked = ruleBlocked || quota.blocked
         Log.d(
             TAG,
-            "win-change pkg=$pkg blocked=$blocked byDefault=$restrictByDefault " +
-                "allowed=${allowedPackages.size} explicit=${explicitBlocked.size}",
+            "win-change pkg=$pkg blocked=$blocked rule=$ruleBlocked mode=$restrictionMode quota=${quota.reason} " +
+                "total=${quota.totalUsedMinutes}/${quota.globalBudgetMinutes}m " +
+                "app=${quota.appUsedMinutes}/${quota.appLimitMinutes ?: "-"}m allowed=${allowedPackages.size}",
         )
         when {
             blocked -> {
                 resetForegroundTracking()
                 val now = System.currentTimeMillis()
                 if (tempAllowPkg == pkg && now < tempAllowUntil) return
-                showOverlay(pkg)
+                showOverlay(pkg, quota.takeIf { it.blocked })
             }
             // 切到别的应用时收起；下拉通知栏这类系统 UI 不收起，避免绕过
             overlay != null && !isSystemUi -> hideOverlay()
@@ -162,7 +238,7 @@ class GuardService : AccessibilityService() {
         }
     }
 
-    private fun showOverlay(pkg: String) {
+    private fun showOverlay(pkg: String, quota: QuotaState? = null) {
         if (overlayPkg == pkg && overlay != null) return
         hideOverlay()
 
@@ -187,7 +263,12 @@ class GuardService : AccessibilityService() {
         })
 
         root.addView(TextView(this).apply {
-            text = "已强制暂停"
+            text = when (quota?.reason) {
+                QuotaReason.GLOBAL_BUDGET_EXCEEDED -> "今日额度已用完"
+                QuotaReason.APP_LIMIT_EXCEEDED -> "今日用量已超限"
+                QuotaReason.FOCUS_WINDOW -> "专注时段"
+                else -> "已强制暂停"
+            }
             setTextColor(Color.parseColor("#FF6B81"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             gravity = Gravity.CENTER
@@ -213,7 +294,21 @@ class GuardService : AccessibilityService() {
         root.addView(countdownView)
 
         root.addView(TextView(this).apply {
-            text = "这个应用当前被限制使用。\n先做点别的事，或者回到桌面。"
+            text = when (quota?.reason) {
+                QuotaReason.GLOBAL_BUDGET_EXCEEDED ->
+                    "今天已经用满 ${quota.globalBudgetMinutes} 分钟额度（已用 ${quota.totalUsedMinutes} 分钟）。\n" +
+                        "除了允许名单里的应用，其他应用今天都不能再用了。"
+
+                QuotaReason.APP_LIMIT_EXCEEDED ->
+                    "这个应用今天限额 ${quota.appLimitMinutes} 分钟，已经用了 ${quota.appUsedMinutes} 分钟。\n" +
+                        "明天再来，或者去设置里调整限额。"
+
+                QuotaReason.FOCUS_WINDOW ->
+                    "现在是专注时段（${FocusWindow.label(focusWindowStart, focusWindowEnd)}），\n" +
+                        "这段时间只能使用白名单里的应用。"
+
+                else -> "这个应用当前被限制使用。\n先做点别的事，或者回到桌面。"
+            }
             setTextColor(Color.parseColor("#C7D0E0"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             gravity = Gravity.CENTER
@@ -319,6 +414,76 @@ class GuardService : AccessibilityService() {
         hideOverlay()
         scope.cancel()
         super.onDestroy()
+    }
+
+    /** 把「上次结算到当前」的时长记到上一个前台应用上 */
+    private fun creditQuota(currentPkg: String? = quotaLastPkg) {
+        val now = System.currentTimeMillis()
+        val lastAt = quotaLastAt
+        val lastPkg = quotaLastPkg
+        if (lastAt > 0 && lastPkg != null && lastPkg != packageName) {
+            val delta = (now - lastAt).coerceIn(0L, 5 * 60_000L)
+            if (delta > 0) {
+                quotaTotalMs += delta
+                quotaPerAppMs[lastPkg] = (quotaPerAppMs[lastPkg] ?: 0L) + delta
+            }
+        }
+        quotaLastPkg = currentPkg
+        quotaLastAt = now
+    }
+
+    private fun resetQuotaIfNewDay() {
+        val today = UsageEventSource.todayDate()
+        if (quotaDate != today) {
+            quotaDate = today
+            quotaTotalMs = 0L
+            quotaPerAppMs.clear()
+            quotaLastAt = 0L
+            scope.launch {
+                runCatching {
+                    val snapshot = Container.quota.todayUsage()
+                    quotaTotalMs = snapshot.totalMinutes * 60_000L
+                    quotaPerAppMs.clear()
+                    snapshot.perAppMinutes.forEach { (pkg, minutes) ->
+                        quotaPerAppMs[pkg] = minutes * 60_000L
+                    }
+                }
+            }
+        }
+    }
+
+    /** 当前是否处于专注时段（时段内只有白名单应用可用） */
+    private fun focusWindowActive(): Boolean {
+        if (!focusWindowEnabled) return false
+        val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        return FocusWindow.isActive(hour, focusWindowStart, focusWindowEnd)
+    }
+
+    /** 当前应用是否触发额度拦截（UI / AI / Service 共用 QuotaPolicy） */
+    private fun quotaState(pkg: String): QuotaState = QuotaPolicy.evaluate(
+        packageName = pkg,
+        totalUsedMinutes = quotaTotalMs / 60_000L,
+        globalBudgetMinutes = dailyBudgetMinutes,
+        globalEnforced = dailyBudgetEnforced,
+        appUsedMinutes = (quotaPerAppMs[pkg] ?: 0L) / 60_000L,
+        appLimitMinutes = appLimits[pkg],
+        whitelisted = pkg in allowedPackages,
+        protected = pkg in protectedPackages,
+        focusWindowActive = focusWindowActive(),
+        focusWindowLabel = FocusWindow.label(focusWindowStart, focusWindowEnd),
+    )
+
+    /** 停留在同一应用超过额度时也要拦（不能等切换应用） */
+    private fun enforceQuotaMidSession() {
+        if (overlay != null) return
+        val pkg = foregroundPkg ?: return
+        if (tempAllowPkg == pkg && System.currentTimeMillis() < tempAllowUntil) return
+        val state = quotaState(pkg)
+        if (state.blocked) {
+            Log.i(TAG, "quota blocked mid-session pkg=$pkg reason=${state.reason}")
+            showOverlay(pkg, state)
+            resetForegroundTracking()
+        }
     }
 
     private fun resetForegroundTracking() {

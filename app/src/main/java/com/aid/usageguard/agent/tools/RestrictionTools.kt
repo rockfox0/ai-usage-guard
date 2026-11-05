@@ -27,13 +27,17 @@ class RestrictionTools(
 
     private inner class ProposeRestrictionTool : AgentTool {
         override val name: String = "propose_restriction"
+        override val kind: ToolKind = ToolKind.PROPOSE
         override val description: String =
-            "针对某个应用向用户提出「暂停 / 限制」建议，并返回规则校验结果。" +
-                "这个工具只生成建议，不会执行任何限制；最终是否生效由用户在应用内确认。"
+            "向用户提出某应用的暂停/限制建议并返回规则校验；不生成草案，真正限制用 set_app_restriction。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
-                "package_name" to JsonSchema.string("应用包名或应用名，例如 com.tencent.mm / 微信"),
+                "package_name" to JsonSchema.string(
+                    "应用包名或应用名，例如 com.tencent.mm / 微信",
+                    format = "app_ref",
+                ),
                 "reason" to JsonSchema.string("建议理由（一句话，中文）"),
                 "daily_limit_minutes" to JsonSchema.integer(
                     "建议的每日使用上限（分钟），可选",

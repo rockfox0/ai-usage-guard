@@ -86,10 +86,75 @@ interface LlmClient {
         tools: List<LlmToolSpec>,
         maxTokens: Int? = null,
     ): LlmResponse
+
+    /**
+     * 流式补全（v1.7 方案 §8.2）：边收边通过 [onTextDelta] 回调增量文本，
+     * 返回值与 [complete] 相同（完整文本 + 累积好的工具调用），上层逻辑不需要区分流式/非流式。
+     *
+     * 约定：
+     * - 只回调**可见文本**，不回调模型内部推理；
+     * - 工具调用参数必须等到流正常结束后才完整解析，半段 JSON 直接判失败、绝不执行；
+     * - 网络分片、多个工具交错分片、结束标记、错误事件、超时与取消由实现处理；
+     * - 流式不可用（服务不支持 / 建连失败 / 空流）抛 [LlmStreamUnavailableException]，
+     *   上层只有在「本任务还没有任何副作用」时才允许降级为非流式重试一次。
+     *
+     * 默认实现直接退化成非流式，兼容未来新增的客户端。
+     */
+    suspend fun completeStream(
+        system: String,
+        messages: List<LlmMessage>,
+        tools: List<LlmToolSpec>,
+        maxTokens: Int? = null,
+        onTextDelta: (String) -> Unit,
+    ): LlmResponse {
+        val response = complete(system, messages, tools, maxTokens)
+        if (response.text.isNotBlank()) onTextDelta(response.text)
+        return response
+    }
 }
 
 /** 模型接口调用失败（网络 / HTTP 状态 / 响应解析）。 */
-class LlmException(message: String, cause: Throwable? = null) : Exception(message, cause)
+open class LlmException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+/**
+ * 流式不可用：服务不支持流式 / 建连失败 / 空流。
+ * 只有这类错误才允许上层在「本任务无副作用」时降级为非流式重试一次；
+ * 流中途断线属于 [LlmException]，不得自动重放任务。
+ */
+class LlmStreamUnavailableException(message: String, cause: Throwable? = null) : LlmException(message, cause)
+
+/**
+ * 流式工具调用的分片累加器：按 provider 的 index（或 id）关联，
+ * 把 `id` / `name` / `arguments` 的多个分片拼回完整调用。
+ */
+internal class ToolCallAccumulator {
+    var id: String = ""
+    var name: String = ""
+    val arguments: StringBuilder = StringBuilder()
+}
+
+/**
+ * 把累积好的分片转换成 [ToolCall]。
+ * 参数必须是完整 JSON：半段/非法 JSON 直接抛 [LlmException]，绝不把残缺参数交给执行器。
+ */
+internal fun finalizedToolCalls(accumulators: Map<Int, ToolCallAccumulator>): List<ToolCall> {
+    val result = ArrayList<ToolCall>()
+    accumulators.toSortedMap().forEach { (index, acc) ->
+        val name = acc.name.trim()
+        if (name.isEmpty()) return@forEach
+        val arguments = acc.arguments.toString().ifBlank { "{}" }
+        val parsed = runCatching { JSONObject(arguments) }.getOrNull()
+            ?: throw LlmException("模型返回的工具参数不是完整 JSON（$name），本次响应已丢弃，不执行任何操作。")
+        result.add(
+            ToolCall(
+                id = acc.id.ifBlank { "call_$index" },
+                name = name,
+                arguments = parsed.toString(),
+            ),
+        )
+    }
+    return result
+}
 
 /**
  * 规范化用户填写的 BaseURL：

@@ -24,7 +24,7 @@ class BehaviorTools(
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
-                "date" to JsonSchema.string("日期，yyyy-MM-dd，缺省为今天"),
+                "date" to JsonSchema.string("日期，yyyy-MM-dd，缺省为今天", format = "date"),
             ),
         )
 

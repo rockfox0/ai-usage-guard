@@ -16,11 +16,24 @@ object RestrictionPolicy {
         explicitBlocked: Set<String>,
         restrictByDefault: Boolean,
         protectedPackages: Set<String>,
-    ): Boolean {
-        if (RuleValidator.isProtected(packageName, protectedPackages)) return false
-        if (packageName in allowedPackages) return false
-        return if (restrictByDefault) true else packageName in explicitBlocked
-    }
+    ): Boolean = effective(
+        packageName, allowedPackages, explicitBlocked, restrictByDefault, protectedPackages,
+    ).restricted
+
+    /** 统一入口：返回是否受限 + 原因（UI / Agent / GuardService 共用） */
+    fun effective(
+        packageName: String,
+        allowedPackages: Set<String>,
+        explicitBlocked: Set<String>,
+        restrictByDefault: Boolean,
+        protectedPackages: Set<String>,
+    ): EffectiveRestriction = EffectiveRestrictionResolver.resolve(
+        packageName = packageName,
+        allowedPackages = allowedPackages,
+        explicitBlocked = explicitBlocked,
+        restrictByDefault = restrictByDefault,
+        protectedPackages = protectedPackages,
+    )
 
     /**
      * 给 UI 用的状态：是否受限、是否因默认策略受限（而非手动勾选）、是否被白名单/系统保护豁免。

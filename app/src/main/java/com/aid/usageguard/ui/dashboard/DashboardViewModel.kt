@@ -10,7 +10,9 @@ import com.aid.usageguard.data.settings.AppSettings
 import com.aid.usageguard.data.settings.SettingsRepository
 import com.aid.usageguard.domain.model.AppUsageSummary
 import com.aid.usageguard.domain.model.DailyTotal
+import com.aid.usageguard.domain.quota.FocusWindow
 import com.aid.usageguard.domain.score.UsageScore
+import com.aid.usageguard.restriction.RestrictionMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,6 +21,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.Calendar
 
 /** 今日使用分布里的一个切片（Top N 之外的 App 汇总成「其他」） */
 data class UsageShare(
@@ -46,6 +49,10 @@ data class DashboardUiState(
     val weekTotals: List<DailyTotal> = emptyList(),
     /** 今日评分（分数 / 等级 / 词条 / 时段分布）；读取失败为 null，不影响其它卡片 */
     val score: UsageScore? = null,
+    /** 限制模式（v1.8.1：额度内自由使用 / 始终限制 / 只限制指定） */
+    val restrictionMode: RestrictionMode = RestrictionMode.QUOTA_AFTER_BUDGET,
+    /** 专注时段当前是否生效（生效时只有白名单应用可用） */
+    val focusWindowActive: Boolean = false,
     val anomalyCount: Int = 0,
     val agentConfigured: Boolean = false,
     val error: String? = null,
@@ -56,6 +63,10 @@ data class DashboardUiState(
 
     val isOverGoal: Boolean
         get() = targetMinutes > 0L && todayMinutes > targetMinutes
+
+    /** 额度用完后是否只剩白名单可用（「超额后才限制」模式） */
+    val afterBudgetOnlyWhitelist: Boolean
+        get() = restrictionMode == RestrictionMode.QUOTA_AFTER_BUDGET
 
     /** 已授权但今天确实没有任何使用记录 */
     val isEmpty: Boolean
@@ -90,7 +101,19 @@ class DashboardViewModel(
             settings.settings
                 .catch { emit(AppSettings.DEFAULT) }
                 .collect { appSettings ->
-                    _state.update { it.copy(targetMinutes = appSettings.dailyTargetMinutes.toLong()) }
+                    val focusActive = appSettings.focusWindowEnabled &&
+                        FocusWindow.isActive(
+                            Calendar.getInstance().get(Calendar.HOUR_OF_DAY),
+                            appSettings.focusWindowStart,
+                            appSettings.focusWindowEnd,
+                        )
+                    _state.update {
+                        it.copy(
+                            targetMinutes = appSettings.dailyTargetMinutes.toLong(),
+                            restrictionMode = RestrictionMode.parse(appSettings.restrictionMode),
+                            focusWindowActive = focusActive,
+                        )
+                    }
                 }
         }
         refresh()

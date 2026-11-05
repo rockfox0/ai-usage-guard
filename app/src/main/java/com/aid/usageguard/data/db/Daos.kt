@@ -35,6 +35,10 @@ interface UsageSessionDao {
     @Query("SELECT * FROM usage_session WHERE startTime >= :from AND startTime < :to ORDER BY startTime")
     suspend fun between(from: Long, to: Long): List<UsageSessionEntity>
 
+    /** 与 [from, to) 有重叠的会话（含跨窗口/跨午夜的会话），用于按真实区间聚合 */
+    @Query("SELECT * FROM usage_session WHERE endTime > :from AND startTime < :to ORDER BY startTime")
+    suspend fun overlapping(from: Long, to: Long): List<UsageSessionEntity>
+
     @Query("SELECT MAX(endTime) FROM usage_session")
     suspend fun latestEnd(): Long?
 
@@ -155,6 +159,9 @@ interface AgentMessageDao {
     @Insert
     suspend fun insert(item: AgentMessageEntity): Long
 
+    @Query("SELECT * FROM agent_message WHERE sessionId = :session ORDER BY timestamp DESC, id DESC LIMIT :limit")
+    suspend fun recentHistory(session: String, limit: Int): List<AgentMessageEntity>
+
     @Query("SELECT * FROM agent_message WHERE sessionId = :session ORDER BY timestamp LIMIT :limit")
     suspend fun history(session: String, limit: Int): List<AgentMessageEntity>
 
@@ -180,5 +187,47 @@ interface DailyScoreDao {
     suspend fun recent(limit: Int): List<DailyScoreEntity>
 
     @Query("DELETE FROM daily_score")
+    suspend fun clear()
+}
+
+@Dao
+interface PendingActionDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: PendingActionEntity)
+
+    @Query("SELECT * FROM pending_action WHERE opId = :opId")
+    suspend fun byId(opId: String): PendingActionEntity?
+
+    @Query("SELECT * FROM pending_action WHERE status = :status ORDER BY createdAt DESC LIMIT :limit")
+    suspend fun byStatus(status: String, limit: Int = 20): List<PendingActionEntity>
+
+    @Query("SELECT * FROM pending_action ORDER BY createdAt DESC LIMIT :limit")
+    suspend fun recent(limit: Int = 20): List<PendingActionEntity>
+
+    @Query("UPDATE pending_action SET status = :status WHERE opId = :opId")
+    suspend fun updateStatus(opId: String, status: String)
+
+    @Query("DELETE FROM pending_action WHERE status IN ('EXECUTED','FAILED','EXPIRED','CANCELLED') AND createdAt < :before")
+    suspend fun purgeFinishedBefore(before: Long)
+
+    @Query("DELETE FROM pending_action")
+    suspend fun clear()
+}
+
+@Dao
+interface AppDailyLimitDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: AppDailyLimitEntity)
+
+    @Query("SELECT * FROM app_daily_limit")
+    suspend fun all(): List<AppDailyLimitEntity>
+
+    @Query("SELECT * FROM app_daily_limit WHERE packageName = :pkg")
+    suspend fun byName(pkg: String): AppDailyLimitEntity?
+
+    @Query("DELETE FROM app_daily_limit WHERE packageName = :pkg")
+    suspend fun delete(pkg: String)
+
+    @Query("DELETE FROM app_daily_limit")
     suspend fun clear()
 }

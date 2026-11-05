@@ -63,7 +63,7 @@ cd AI_d
 设备初始化（安装 + 使用情况访问 + 无障碍 + 可选 AI 配置）：
 
 ```bash
-UG_API_KEY='sk-xxx' UG_BASE_URL='https://api.deepseek.com' ./scripts/ug_setup_device.sh <序列号>
+UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh <序列号>
 ```
 
 > ⚠️ 重装/更新 APK 后系统会重置无障碍授权，脚本里每次都重新开启；手动路径：设置 → 无障碍 →「AI 使用管家 · 应用暂停守护」。
@@ -192,3 +192,88 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='https://api.deepseek.com' ./scripts/ug_setup_de
 - **Agent**：新增 `get_usage_score(scope=today|week, date?)` 工具（工具 25→26）；CHAT_SYSTEM 要求问分数时先调用；
   REPORT_SYSTEM 要求日报/周报先调用并把分数与词条写到开头。
 - 真机验收见 `../out/ai_usage_guard/report_v1.6_score.md`。
+
+---
+
+## 十二、v1.7 Phase 0：数据与限制状态正确性（按升级方案 §4）
+
+| 方案条目 | 实现 |
+|---|---|
+| 4.1 会话与每日统计 | `domain/aggregate/DailyAggregator.kt` 对真实会话做按日重叠切片；跨午夜两天各计实际时长、启动次数归属开始日；`UsageIngester` 窗口前移 6h 重叠回看 + 重算受影响日期 |
+| 4.2 数据覆盖 | `DataCoverage`/`DataStatus` + `UsageRepository.coverage()`（requested/available/valid/missing/lastSyncedAt/timezone） |
+| 4.3 生效策略 | `restriction/EffectiveRestriction.kt` + `RestrictionPolicy.effective()`，UI/Agent/GuardService 共用 |
+| 4.4 评分可信度 | `UsageScore.dataStatus/scoreAvailable`；周平均只统计有效天；`daily_score` 增加 `algorithmVersion`/`dataStatus` |
+| 4.6 对话历史 | `AgentMessageDao.recentHistory()` + `AgentMemory` 改为「最近 N 条再正序」 |
+| Phase 1 基础设施 | Room v3 `pending_action` 表 + `ActionDraftRepository`（草案/确认/幂等/过期）+ `ActionExecutor`（确认后执行并核对实际值） |
+| 可复现构建/测试 | `gradlew`（8.13）+ 11 个 JVM 单元测试（跨午夜切片、有效策略） |
+
+真机（Pixel 6 / Android 13）：v1.6→v1.7 迁移保留 102 会话/28 记录、DB v3、无崩溃；
+聚合与独立重算 0 偏差；白名单加入→`blocked=false`、移出→`blocked=true`（T05）。
+报告见 `../out/ai_usage_guard/report_v1.7_phase0.md`。
+
+
+---
+
+## 十三、v1.7 Phase 1 + Phase 2
+
+### Phase 1（权限与确认）
+- `TaskScope{CHAT,REPORT,BACKGROUND,INSIGHT}` + `ToolKind{QUERY,PROPOSE,CONTROL}`；模型可见工具与执行器允许集合共用 `ToolScopePolicy`（报告/后台/洞察只读）。
+- ControlTools 12 个改状态工具 + set_whitelist 改为 `ActionDraftRepository.propose(...)` 生成 PENDING 草案（opId、before/after、5 分钟 TTL），不再直接改设置。
+- `TaskBudget`：模型 ≤6、工具 ≤12、墙钟 ≤180s（单调时钟，CoroutineContext 下传、嵌套共享）；超预算返回部分结果；取消用 `ensureActive()`。
+- `ActionExecutor` 只执行 CONFIRMED 草案，参数来自草案，执行后重读实际值核对。
+
+### Phase 2（交互升级）
+- 流式：`LlmClient.completeStream`，OpenAI/Anthropic SSE 分别实现，工具参数按 index/id 累积，半段 JSON 不执行、断流不重放、仅无副作用时降级非流式。
+- 统一事件：`AgentEvent{TextDelta,ToolStarted,ToolFinished,DataBlock,ActionProposed,Completed,Failed,Cancelled}`，仅前台对话根任务发射。
+- 上下文：`AgentContext` 提交时快照注入提示词；助手页 chip「正在分析：… · 最近 N 天」可切换、发送中固定。
+- 确认 UI：设置页「待确认操作」卡片（类型/目标/`before→after`/有效期/确认/取消），助手页消息流内插入 `ActionProposed` 卡片。
+- 新工具 `get_pending_actions`（QUERY，工具 27 个）。
+
+真机（Pixel 6）：草案生成不生效 → UI 确认后 DataStore 生效（90 分钟）、DB EXECUTED、过期草案 EXPIRED、重复确认不再执行；流式正文逐段增长；上下文 chip 正常。
+报告见 `../out/ai_usage_guard/report_v1.7_phase1_2.md`。
+
+
+---
+
+## 十四、v1.7 真机回归（vivo）与 null 显示修复
+
+- 缺陷：流式解析把 JSON 的 `null` 当正文。OpenAI SSE 工具调用分片的 `delta.content` 是 JSON null，
+  `optString` 返回字符串 "null"，被当作 TextDelta 拼进回复并落库，界面出现 nullnull…。
+- 修复：两个客户端的流式/非流式正文与工具名/参数均改为「显式判断是 String 才使用」；
+  `AgentMemory.sanitizeContent()` 清理历史脏数据前缀，并用于 LLM 回放。
+- 真机（vivo V2527A / Android 16）：修复后新消息无 null、历史消息显示已清理；DB v2→v3 迁移数据完整；
+  草案（360→300）生成后由用户在应用内确认并执行，DataStore 生效；第三方应用拦截、系统应用放行正常。
+
+---
+
+## 十五、v1.8：全局每日额度 + 单应用每日限额
+
+- `domain/quota/QuotaPolicy`：系统保护 > 单应用限额 > 白名单 > 全局额度（9 个单测）。
+- `app_daily_limit` 表（DB v4）+ `QuotaRepository`（limits/limitOf/setLimit/todayUsage/status）。
+- `GuardService`：实时计账（DB 基线 + 前台累计 + 跨日重置），窗口切换与 20s 巡检双通道拦截；浮层区分「今日额度已用完」/「今日用量已超限」。
+- 设置：`dailyBudgetEnforced`（超出每日目标后拦截非白名单应用）。
+- UI：App 详情「每日限额」卡、列表限额徽章、设置「每日使用额度」卡、首页额度剩余。
+- AI：`set_app_daily_limit` / `set_daily_budget_enforced`（草案确认）、`get_quota_status`（只读）；工具 30 个。
+- 真机（vivo）：全局额度用尽拦截 ✅、白名单应用被单应用限额拦截 ✅、UI 读写与 DB 迁移 ✅（26 单测通过）。
+
+---
+
+## 十六、v1.8.1：限制模式三档（额度内全放行）
+
+- 新增 `restriction/RestrictionMode`：`QUOTA_AFTER_BUDGET`（默认）/ `ALWAYS_NON_WHITELIST` / `MANUAL_ONLY`；
+  `SettingsRepository.restrictionMode` + `setRestrictionMode()`（同步旧布尔键，旧布尔值迁移为 ALWAYS/MANUAL）。
+- `GuardService`：QUOTA 模式下额度内只按「手动限制」判断，超额后由 `QuotaPolicy` 拦非白名单；另外两种模式保持原语义。
+- 单应用每日限额在所有模式下独立生效，且优先于白名单；系统保护应用永不受限。
+- UI：设置页「限制模式」三选一；应用列表/首页文案随模式变化（「额度内自由使用 · 超额后仅白名单可用（今日剩余 X 分钟）」）。
+- AI：新工具 `set_restriction_mode`（草案），`get_app_settings`/`get_quota_status` 暴露当前模式。
+- 真机（vivo）：额度内非白名单应用可打开；超额后被拦截并提示；超额时白名单应用仍可用；26 单测通过。
+
+---
+
+## 十七、v1.8.2：30 天数据、更宽上下文、白名单每日上限、专注时段
+
+- **30 天**：首次回填 7→30 天、单次窗口 8→31 天；`UsageRepository.dailyTotals/ForLastDays/rankingForRange`；工具 `get_usage_trend(1..30)` 与 `get_app_usage_history`(≤30)。
+- **上下文**：历史回放 12→24 条并逐条截断（用户 600/助手 1200 字）；系统提示词加「本地数据快照」（今日/7 天/30 天日均、Top3 应用、白名单额度），标注仅作概览、数值须调工具；22 条工具描述精简（最长 198→81 字）。
+- **白名单每日上限**：`WhitelistRepository`（默认每天 1 个，跨天重置，移出不计次），所有写入口（UI、ActionExecutor、AI 草案）统一走它；`set_whitelist_daily_limit` 草案工具。
+- **专注时段**：`FocusWindow`（支持跨午夜）+ `QuotaReason.FOCUS_WINDOW`，GuardService 实时拦截并显示专用浮层；`set_focus_window` 草案工具；设置/列表/详情/首页均有状态展示。
+- 真机（vivo）：专注时段拦截与白名单放行、白名单第 2 个添加被拒（开关回滚）、34 单测通过。

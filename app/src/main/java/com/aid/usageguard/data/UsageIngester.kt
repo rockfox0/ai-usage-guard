@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import androidx.room.withTransaction
 import com.aid.usageguard.data.db.AppDatabase
+import com.aid.usageguard.domain.aggregate.DailyAggregator
+import com.aid.usageguard.domain.aggregate.SessionRange
 import com.aid.usageguard.data.db.AppInfoEntity
 import com.aid.usageguard.data.db.AppUsageRecordEntity
 import com.aid.usageguard.data.db.SyncStateEntity
@@ -42,18 +44,15 @@ class UsageIngester(
         val now = System.currentTimeMillis()
         val stateDao = db.syncStateDao()
         val lastIngest = stateDao.get(KEY_LAST_INGEST)
-        val windowMs = if (lastIngest == null) {
-            FIRST_BACKFILL_MS
-        } else {
-            maxOf(DEFAULT_WINDOW_MS, now - lastIngest + 2 * 60_000L)
-        }
-        val cut = now - windowMs
+        // 窗口向前多回看 OVERLAP_MS：覆盖「开始于窗口前、结束于窗口内」的会话（方案 T03）
+        val base = lastIngest ?: (now - FIRST_BACKFILL_MS)
+        val queryFrom = maxOf(now - MAX_WINDOW_MS, base - OVERLAP_MS)
 
         val homePkgs = source.launcherPackages()
         val excluded = homePkgs + context.packageName
 
-        val events = source.readEvents(cut, now)
-        val sessions = buildSessions(events, excluded, cut, now)
+        val events = source.readEvents(queryFrom, now)
+        val sessions = buildSessions(events, excluded, queryFrom, now)
         val appInfos = sessions.map { it.packageName }.distinct().mapNotNull { pkg ->
             val name = source.appNameOf(pkg) ?: return@mapNotNull null
             AppInfoEntity(
@@ -65,32 +64,59 @@ class UsageIngester(
 
         var touchedDays = 0
         db.withTransaction {
-            db.usageSessionDao().deleteFrom(cut)
+            db.usageSessionDao().deleteFrom(queryFrom)
             if (sessions.isNotEmpty()) db.usageSessionDao().insertAll(sessions)
             db.appInfoDao().upsertAll(appInfos)
 
-            val dates = sessions.map { it.date }.distinct()
-            touchedDays = dates.size
-            for (date in dates) {
-                val dayStart = UsageEventSource.startOfDay(date)
-                val dayEnd = dayStart + UsageEventSource.DAY_MS
-                val daySessions = db.usageSessionDao().between(dayStart, dayEnd)
-                val records = daySessions.groupBy { it.packageName }.map { (pkg, list) ->
-                    AppUsageRecordEntity(
-                        packageName = pkg,
-                        date = date,
-                        totalDuration = list.sumOf { it.duration },
-                        launchCount = list.size,
-                        lastUsedTime = list.maxOf { it.endTime },
-                    )
-                }
-                db.appUsageRecordDao().deleteBetween(date, date)
-                if (records.isNotEmpty()) db.appUsageRecordDao().upsertAll(records)
-            }
+            // 重算受影响的全部日期（含窗口前的重叠会话所在日期），避免旧聚合残留
+            touchedDays = recomputeDates(
+                UsageEventSource.dateOf(queryFrom),
+                UsageEventSource.dateOf(now),
+            )
             stateDao.put(SyncStateEntity(KEY_LAST_INGEST, now))
         }
-        Log.d("UsageIngester", "ingest done: sessions=${sessions.size} days=$touchedDays window=${windowMs / 60_000}min")
-        IngestResult(sessions.size, touchedDays, cut, now, true)
+        Log.d(
+            "UsageIngester",
+            "ingest done: sessions=${sessions.size} days=$touchedDays window=[${queryFrom}, $now]",
+        )
+        IngestResult(sessions.size, touchedDays, queryFrom, now, true)
+    }
+
+    /**
+     * 按真实会话区间重算 [fromDate, toDate] 每天的应用聚合。
+     * 跨午夜的会话在两天各计其重叠时长，启动次数仍按会话开始日归属。
+     */
+    private suspend fun recomputeDates(fromDate: String, toDate: String): Int {
+        val end = UsageEventSource.startOfDay(toDate) + UsageEventSource.DAY_MS
+        var dayStart = UsageEventSource.startOfDay(fromDate)
+        var days = 0
+        while (dayStart < end) {
+            val dayEnd = dayStart + UsageEventSource.DAY_MS
+            val date = UsageEventSource.dateOf(dayStart)
+            val sessions = db.usageSessionDao().overlapping(dayStart, dayEnd)
+            val slices = DailyAggregator.aggregate(
+                sessions.map { SessionRange(it.packageName, it.startTime, it.endTime) },
+                dayStart,
+                dayEnd,
+            )
+            db.appUsageRecordDao().deleteBetween(date, date)
+            if (slices.isNotEmpty()) {
+                db.appUsageRecordDao().upsertAll(
+                    slices.map { slice ->
+                        AppUsageRecordEntity(
+                            packageName = slice.packageName,
+                            date = date,
+                            totalDuration = slice.durationMs,
+                            launchCount = slice.launchCount,
+                            lastUsedTime = slice.lastUsedMs,
+                        )
+                    },
+                )
+            }
+            days++
+            dayStart = dayEnd
+        }
+        return days
     }
 
     private fun buildSessions(
@@ -138,8 +164,13 @@ class UsageIngester(
     companion object {
         private const val KEY_LAST_INGEST = "last_ingest_at"
         private const val MIN_SESSION_MS = 1_000L
-        private const val DEFAULT_WINDOW_MS = 24L * 60 * 60 * 1000
-        private const val FIRST_BACKFILL_MS = 7L * 24 * 60 * 60 * 1000
+        private const val FIRST_BACKFILL_MS = 30L * 24 * 60 * 60 * 1000
+
+        /** 单次回看上限（8 天），避免长时间未同步时拉取过多事件 */
+        private const val MAX_WINDOW_MS = 31L * 24 * 60 * 60 * 1000
+
+        /** 窗口重叠回看：捕获开始于上次同步之前、结束于本次窗口内的会话 */
+        private const val OVERLAP_MS = 6L * 60 * 60 * 1000
 
         private const val FOREGROUND = 1 // MOVE_TO_FOREGROUND / ACTIVITY_RESUMED
         private const val BACKGROUND = 2 // MOVE_TO_BACKGROUND / ACTIVITY_PAUSED

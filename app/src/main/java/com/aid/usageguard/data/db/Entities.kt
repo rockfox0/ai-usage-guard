@@ -119,4 +119,44 @@ data class DailyScoreEntity(
     /** 时段分布，JSON: {"early":..,"morning":..,"afternoon":..,"evening":..,"night":..} */
     val slotsJson: String,
     val updatedAt: Long,
+    /** 评分算法版本，便于以后标记旧版本记录 */
+    val algorithmVersion: Int = 1,
+    /** VALID / PARTIAL / NO_PERMISSION / NOT_SYNCED / FAILED */
+    val dataStatus: String = "VALID",
+)
+
+/**
+ * AI 提议的「待确认操作」（v1.7 方案 6.2）。
+ * 控制类工具不再直接改设置，而是生成草案；用户确认后由本地执行器按保存参数执行。
+ */
+@Entity(
+    tableName = "pending_action",
+    indices = [Index("status"), Index("createdAt")],
+)
+data class PendingActionEntity(
+    @PrimaryKey val opId: String,
+    val taskId: String,
+    /** SET_DAILY_TARGET / SET_QUIET_HOURS / SET_THEME / ... / SET_APP_RESTRICTION */
+    val type: String,
+    /** 目标应用包名集合（逗号分隔），无则空串 */
+    val packages: String,
+    val paramsJson: String,
+    val beforeJson: String,
+    val afterJson: String,
+    /** PENDING / CONFIRMED / EXECUTED / FAILED / EXPIRED / CANCELLED */
+    val status: String,
+    val createdAt: Long,
+    val expiresAt: Long,
+    val confirmedAt: Long? = null,
+    val executedAt: Long? = null,
+    val resultJson: String? = null,
+    val error: String? = null,
+)
+
+/** 单应用每日时长限额（v1.8）。minutes<=0 视为未设置 */
+@Entity(tableName = "app_daily_limit")
+data class AppDailyLimitEntity(
+    @PrimaryKey val packageName: String,
+    val dailyLimitMinutes: Int,
+    val updatedAt: Long,
 )

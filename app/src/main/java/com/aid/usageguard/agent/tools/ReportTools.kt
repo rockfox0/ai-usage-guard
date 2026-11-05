@@ -25,8 +25,8 @@ class ReportTools(
     private inner class GenerateReportTool : AgentTool {
         override val name: String = "generate_usage_report"
         override val description: String =
-            "基于本地真实统计生成一份使用情况报告草稿（daily=日报，weekly=周报）。" +
-                "返回报告正文草稿与关键指标，供你改写润色；不要把草稿原样当作自己的分析结论。"
+            "基于本地真实统计生成日报/周报草稿与关键指标；不要把草稿原样当结论。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(

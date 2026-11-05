@@ -34,9 +34,8 @@ class ScoreTools(
         override val name: String = "get_usage_score"
 
         override val description: String =
-            "查询「今日打分」或「每周总结」：分数、等级、个性化词条、判断句、时段分布（today）或" +
-                "平均分/趋势/最好最差的一天（week）。用户问「今天表现怎么样 / 打了多少分 / 这周怎么样」时先调用本工具。" +
-                "只读，不会修改任何数据或设置。"
+            "查询今日评分（scope=today）或每周总结（scope=week）：分数、等级、词条与建议依据。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
@@ -44,7 +43,10 @@ class ScoreTools(
                     "today=今日评分（默认）；week=最近 7 天总结",
                     enum = listOf("today", "week"),
                 ),
-                "date" to JsonSchema.string("可选，yyyy-MM-dd；仅 scope=today 时生效，缺省为今天"),
+                "date" to JsonSchema.string(
+                    "可选，yyyy-MM-dd；仅 scope=today 时生效，缺省为今天",
+                    format = "date",
+                ),
             ),
         )
 

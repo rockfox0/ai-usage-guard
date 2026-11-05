@@ -8,13 +8,18 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.aid.usageguard.MainActivity
 import com.aid.usageguard.R
+import com.aid.usageguard.data.Container
 import com.aid.usageguard.data.UsageEventSource
+import com.aid.usageguard.data.repo.ActionDraftRepository
 import com.aid.usageguard.data.repo.ReportRepository
 import com.aid.usageguard.data.repo.UsageRepository
+import com.aid.usageguard.data.repo.WhitelistRepository
 import com.aid.usageguard.data.settings.AppSettings
 import com.aid.usageguard.data.settings.SettingsRepository
+import com.aid.usageguard.domain.quota.FocusWindow
 import com.aid.usageguard.notify.NotificationHelper
 import com.aid.usageguard.restriction.AppRestrictionController
+import com.aid.usageguard.restriction.EffectiveRestrictionResolver
 import com.aid.usageguard.restriction.RuleValidator
 import org.json.JSONArray
 import org.json.JSONObject
@@ -22,17 +27,16 @@ import org.json.JSONObject
 /**
  * App 控制工具组（15 个）：让 AI 助手在**用户明确要求**时调控本 App。
  *
- * 设计约定：
- * - 查询类（get_app_settings）只读，随时可调；
- * - 修改类（set_*）一律「仅在用户明确要求修改时调用；只是询问时用 get_app_settings」，
- *   并且返回统一结构 `{executed, changed:{字段:{from,to}}, message, settingsUrlHint}`，
- *   message 是给用户看的一句话（含旧→新），便于模型直接复述；
- * - 涉及系统保护应用（电话/短信/设置/桌面/本应用等）一律用 [RuleValidator] 拒绝；
- * - 没有任何执行代码 / Shell / 任意文件读写的通道。
+ * v1.7 权限与确认（方案 §6.1/§6.2）：
+ * - 只读类 [GetAppSettingsTool] 是 QUERY，所有任务域可见；
+ * - 12 个会改设置 / 限制 / 白名单 / 数据同步的工具改为 **PROPOSE**：不再直接写 DataStore/Room，
+ *   而是调用 [ActionDraftRepository.propose] 生成 PENDING 待确认草案（携带修改前后值），
+ *   返回 `{executed:false, requiresConfirmation:true, opId, type, changed, message}`；
+ *   用户确认后由本地 `ActionExecutor` 按保存的参数执行；
+ * - 生成报告（本地结果保存）与测试通知（瞬时通知）没有「前后值」，按方案 §6 属于允许的本地结果/通知，
+ *   归为 CONTROL：只在对话域可用，直接执行但绝不改用户业务配置。
  *
- * 说明：generate_report_now 会调用 [ReportRepository]，而 ReportRepository 内部会回调
- * [com.aid.usageguard.agent.contract.AgentRuntime.generateDailyReport]，属于「嵌套一次 Agent 任务」；
- * 这里用 [reportGenerating] 做个递归护栏，避免模型在报告任务里再次触发本工具导致无限递归。
+ * 执行器会独立校验 [ToolKind]：报告 / 后台 / 洞察任务里这些 PROPOSE/CONTROL 工具既不可见也执行不了。
  */
 class ControlTools(
     private val context: Context,
@@ -41,6 +45,12 @@ class ControlTools(
     private val reports: ReportRepository,
     private val usage: UsageRepository,
     private val source: UsageEventSource,
+    /** 待确认草案仓库（默认延迟取 Container，避免 AppWiring 再多一个注入参数） */
+    private val actionDraftsProvider: () -> ActionDraftRepository = { Container.actionDrafts },
+    /** 当前任务 id，由 AgentLoop 注入；草案会归属到该任务 */
+    private val taskIdProvider: () -> String = { "" },
+    /** 白名单仓储（v1.8.2：只读每日添加上限），默认延迟取 Container */
+    private val whitelistProvider: () -> WhitelistRepository = { Container.whitelist },
 ) {
 
     val all: List<AgentTool> = listOf(
@@ -61,27 +71,34 @@ class ControlTools(
         SendTestNotificationTool(),
     )
 
-    /** generate_report_now 的递归护栏（报告任务自身也会挂载这些工具） */
+    /** generate_report_now 的递归护栏（报告任务自身也会挂载只读工具） */
     @Volatile
     private var reportGenerating = false
 
     // ==================================================================
-    // 1) 只读：get_app_settings
+    // 1) 只读：get_app_settings（QUERY）
     // ==================================================================
 
     private inner class GetAppSettingsTool : AgentTool {
         override val name: String = "get_app_settings"
         override val description: String =
-            "查询当前全部 App 设置：每日目标、勿扰时段、通知开关与渠道、提醒风格、主题、限制模式、白名单数量、" +
-                "实时提示、AI 分析与个性化。只读，不会修改任何设置。修改请用对应的 set_* 工具。"
+            "查询全部 App 设置（目标/额度、勿扰、通知、主题、限制模式、白名单、专注时段、AI 个性化）。只读。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(properties = emptyList())
 
         override suspend fun execute(arguments: JSONObject): JSONObject {
             val prefs = settings.current()
+            val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+            val focusActive = prefs.focusWindowEnabled &&
+                FocusWindow.isActive(hour, prefs.focusWindowStart, prefs.focusWindowEnd)
+            val whitelistQuota = runCatching { whitelistProvider().quota() }.getOrNull()
             return JSONObject().apply {
                 put("executed", false)
+                put("changed", JSONObject())
                 put("dailyTargetMinutes", prefs.dailyTargetMinutes)
+                put("dailyBudgetEnforced", prefs.dailyBudgetEnforced)
+            put("restrictionModeLabel", com.aid.usageguard.restriction.RestrictionMode.parse(prefs.restrictionMode).label)
                 put(
                     "quietHours",
                     JSONObject().apply {
@@ -102,7 +119,24 @@ class ControlTools(
                 put("reminderStyle", prefs.reminderStyle)
                 put("themeMode", prefs.themeMode)
                 put("restrictByDefault", prefs.restrictByDefault)
+            put(
+                "restrictionMode",
+                com.aid.usageguard.restriction.RestrictionMode.parse(prefs.restrictionMode).name,
+            )
                 put("whitelistCount", prefs.allowedPackages.size)
+                put("whitelistDailyLimit", whitelistQuota?.limit ?: prefs.whitelistDailyLimit)
+                put("whitelistAddedToday", whitelistQuota?.used ?: prefs.whitelistAddCount)
+                put(
+                    "whitelistRemainingToday",
+                    whitelistQuota?.let { if (it.unlimited) -1 else it.remaining } ?: -1,
+                )
+                put("focusWindow", JSONObject().apply {
+                    put("enabled", prefs.focusWindowEnabled)
+                    put("start_hour", prefs.focusWindowStart)
+                    put("end_hour", prefs.focusWindowEnd)
+                    put("text", FocusWindow.label(prefs.focusWindowStart, prefs.focusWindowEnd))
+                    put("active_now", focusActive)
+                })
                 put("aiAnalysisEnabled", prefs.aiAnalysisEnabled)
                 put("realtimeNudgeEnabled", prefs.realtimeNudgeEnabled)
                 put("nudgeIntervalMinutes", prefs.nudgeIntervalMinutes)
@@ -111,7 +145,6 @@ class ControlTools(
                 put("aiTone", prefs.aiTone)
                 put("aiFocus", JSONArray(prefs.aiFocus.toList()))
                 put("aiCustomPrompt", prefs.aiCustomPrompt)
-                put("changed", JSONObject())
                 put("message", "已读取当前设置。")
                 put("settingsUrlHint", SETTINGS_HINT)
             }
@@ -119,13 +152,15 @@ class ControlTools(
     }
 
     // ==================================================================
-    // 2) 每日目标
+    // 2) 每日目标（PROPOSE → SET_DAILY_TARGET）
     // ==================================================================
 
     private inner class SetDailyTargetTool : AgentTool {
         override val name: String = "set_daily_target"
+        override val kind: ToolKind = ToolKind.PROPOSE
         override val description: String =
-            "修改每日使用目标（30-1440 分钟）。仅在用户明确要求修改时调用；只是询问时用 get_app_settings。"
+            "生成每日目标草案（30-1440 分钟）；该分钟数即每日总额度，配 set_daily_budget_enforced 决定超限拦截。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
@@ -141,24 +176,27 @@ class ControlTools(
                 throw ToolArgumentException("minutes 需在 30-1440 之间，收到 $minutes")
             }
             val before = settings.current().dailyTargetMinutes
-            settings.setDailyTarget(minutes)
-            val after = settings.current().dailyTargetMinutes
-            return result(
-                executed = true,
-                message = "每日使用目标已从 $before 分钟调整为 $after 分钟。",
-                changed = changedOf("dailyTargetMinutes" to change(before, after)),
+            return proposeDraft(
+                type = "SET_DAILY_TARGET",
+                params = JSONObject().put("minutes", minutes),
+                before = JSONObject().put("minutes", before),
+                after = JSONObject().put("minutes", minutes),
+                changed = changedOf("dailyTargetMinutes" to change(before, minutes)),
+                message = "每日目标 $before → $minutes 分钟。",
             )
         }
     }
 
     // ==================================================================
-    // 3) 勿扰时段
+    // 3) 勿扰时段（PROPOSE → SET_QUIET_HOURS）
     // ==================================================================
 
     private inner class SetQuietHoursTool : AgentTool {
         override val name: String = "set_quiet_hours"
+        override val kind: ToolKind = ToolKind.PROPOSE
         override val description: String =
-            "修改免打扰时段（0-23 点，跨零点如 23→7 也支持）。仅在用户明确要求修改时调用；只是询问时用 get_app_settings。"
+            "生成免打扰时段草案（0-23 点，支持跨零点），需确认。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
@@ -177,28 +215,33 @@ class ControlTools(
             if (end !in 0..23) throw ToolArgumentException("end_hour 需在 0-23 之间，收到 $end")
 
             val before = settings.current()
-            settings.setQuietHours(start, end)
-            val after = settings.current()
-            return result(
-                executed = true,
-                message = "勿扰时段已从 ${ToolFormat.clock(before.quietHoursStart)}-${ToolFormat.clock(before.quietHoursEnd)}" +
-                    " 调整为 ${ToolFormat.clock(after.quietHoursStart)}-${ToolFormat.clock(after.quietHoursEnd)}。",
+            return proposeDraft(
+                type = "SET_QUIET_HOURS",
+                params = JSONObject().put("start_hour", start).put("end_hour", end),
+                before = JSONObject()
+                    .put("start_hour", before.quietHoursStart)
+                    .put("end_hour", before.quietHoursEnd),
+                after = JSONObject().put("start_hour", start).put("end_hour", end),
                 changed = changedOf(
-                    "quietHoursStart" to change(before.quietHoursStart, after.quietHoursStart),
-                    "quietHoursEnd" to change(before.quietHoursEnd, after.quietHoursEnd),
+                    "quietHoursStart" to change(before.quietHoursStart, start),
+                    "quietHoursEnd" to change(before.quietHoursEnd, end),
                 ),
+                message = "勿扰时段 ${ToolFormat.clock(before.quietHoursStart)}-${ToolFormat.clock(before.quietHoursEnd)}" +
+                    " → ${ToolFormat.clock(start)}-${ToolFormat.clock(end)}。",
             )
         }
     }
 
     // ==================================================================
-    // 4) 通知总开关
+    // 4) 通知总开关（PROPOSE → SET_NOTIFICATION_ENABLED）
     // ==================================================================
 
     private inner class SetNotificationEnabledTool : AgentTool {
         override val name: String = "set_notification_enabled"
+        override val kind: ToolKind = ToolKind.PROPOSE
         override val description: String =
-            "开关全部通知（总开关）。仅在用户明确要求修改时调用；只是询问时用 get_app_settings。"
+            "生成通知总开关草案（开启/关闭全部通知），需确认。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
@@ -211,26 +254,27 @@ class ControlTools(
             val enabled = arguments.boolArg("enabled")
                 ?: throw ToolArgumentException("缺少必填参数 enabled（true / false）")
             val before = settings.current().notificationEnabled
-            settings.setNotificationEnabled(enabled)
-            val after = settings.current().notificationEnabled
-            return result(
-                executed = true,
-                message = "通知总开关已${onOff(after)}。",
-                changed = changedOf("notificationEnabled" to change(before, after)),
+            return proposeDraft(
+                type = "SET_NOTIFICATION_ENABLED",
+                params = JSONObject().put("enabled", enabled),
+                before = JSONObject().put("enabled", before),
+                after = JSONObject().put("enabled", enabled),
+                changed = changedOf("notificationEnabled" to change(before, enabled)),
+                message = "通知总开关 ${onOff(before)} → ${onOff(enabled)}。",
             )
         }
     }
 
     // ==================================================================
-    // 5) 通知渠道（5 个可空开关）
+    // 5) 通知渠道（PROPOSE → SET_NOTIFICATION_CHANNELS）
     // ==================================================================
 
     private inner class SetNotificationChannelsTool : AgentTool {
         override val name: String = "set_notification_channels"
+        override val kind: ToolKind = ToolKind.PROPOSE
         override val description: String =
-            "分别开关五类通知渠道：daily_reminder（每日提醒）、goal_exceeded（超目标）、anomaly（异常）、" +
-                "daily_summary（日报摘要）、weekly_summary（周报摘要）。只更新传入的渠道，至少提供一个。" +
-                "仅在用户明确要求修改时调用；只是询问时用 get_app_settings。"
+            "生成通知渠道草案：daily_reminder/goal_exceeded/anomaly/daily_summary/weekly_summary，只改传入项。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
@@ -248,39 +292,44 @@ class ControlTools(
                 arguments.boolArg(key)?.let { provided[key] = it }
             }
             if (provided.isEmpty()) {
-                throw ToolArgumentException(
-                    "至少提供一个渠道开关：${CHANNEL_KEYS.joinToString(" / ")}",
-                )
+                throw ToolArgumentException("至少提供一个渠道开关：${CHANNEL_KEYS.joinToString(" / ")}")
             }
 
             val before = settings.current()
-            provided.forEach { (key, enabled) -> applyChannel(key, enabled) }
-            val after = settings.current()
-
+            val params = JSONObject()
+            val beforeJson = JSONObject()
+            val afterJson = JSONObject()
             val changed = JSONObject()
             val parts = ArrayList<String>()
-            provided.forEach { (key, _) ->
+            provided.forEach { (key, enabled) ->
+                params.put(key, enabled)
                 val old = channelValue(before, key)
-                val new = channelValue(after, key)
-                changed.put(key, change(old, new))
-                parts.add("${channelLabel(key)} ${onOff(old)}→${onOff(new)}")
+                beforeJson.put(key, old)
+                afterJson.put(key, enabled)
+                changed.put(key, change(old, enabled))
+                parts.add("${channelLabel(key)} ${onOff(old)}→${onOff(enabled)}")
             }
-            return result(
-                executed = true,
-                message = "已更新通知渠道：" + parts.joinToString("；") + "。",
+            return proposeDraft(
+                type = "SET_NOTIFICATION_CHANNELS",
+                params = params,
+                before = beforeJson,
+                after = afterJson,
                 changed = changed,
+                message = "通知渠道：" + parts.joinToString("；") + "。",
             )
         }
     }
 
     // ==================================================================
-    // 6) 提醒风格
+    // 6) 提醒风格（PROPOSE → SET_REMINDER_STYLE）
     // ==================================================================
 
     private inner class SetReminderStyleTool : AgentTool {
         override val name: String = "set_reminder_style"
+        override val kind: ToolKind = ToolKind.PROPOSE
         override val description: String =
-            "修改本地提醒风格：gentle（温和）或 strict（严格）。仅在用户明确要求修改时调用；只是询问时用 get_app_settings。"
+            "生成提醒风格草案：gentle（温和）/strict（严格），需确认。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
@@ -295,24 +344,27 @@ class ControlTools(
             requireEnum(style, listOf("gentle", "strict"), "style")
 
             val before = settings.current().reminderStyle
-            settings.setReminderStyle(style)
-            val after = settings.current().reminderStyle
-            return result(
-                executed = true,
-                message = "提醒风格已从${reminderStyleLabel(before)}改为${reminderStyleLabel(after)}。",
-                changed = changedOf("reminderStyle" to change(before, after)),
+            return proposeDraft(
+                type = "SET_REMINDER_STYLE",
+                params = JSONObject().put("style", style),
+                before = JSONObject().put("style", before),
+                after = JSONObject().put("style", style),
+                changed = changedOf("reminderStyle" to change(before, style)),
+                message = "提醒风格 ${reminderStyleLabel(before)} → ${reminderStyleLabel(style)}。",
             )
         }
     }
 
     // ==================================================================
-    // 7) 主题
+    // 7) 主题（PROPOSE → SET_THEME_MODE）
     // ==================================================================
 
     private inner class SetThemeModeTool : AgentTool {
         override val name: String = "set_theme_mode"
+        override val kind: ToolKind = ToolKind.PROPOSE
         override val description: String =
-            "切换主题：system（跟随系统）/ light（浅色）/ dark（深色）。仅在用户明确要求修改时调用；只是询问时用 get_app_settings。"
+            "生成主题草案：system（跟随系统）/light/dark，需确认。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
@@ -327,25 +379,27 @@ class ControlTools(
             requireEnum(mode, listOf("system", "light", "dark"), "mode")
 
             val before = settings.current().themeMode
-            settings.setThemeMode(mode)
-            val after = settings.current().themeMode
-            return result(
-                executed = true,
-                message = "主题已从${themeLabel(before)}改为${themeLabel(after)}。",
-                changed = changedOf("themeMode" to change(before, after)),
+            return proposeDraft(
+                type = "SET_THEME_MODE",
+                params = JSONObject().put("mode", mode),
+                before = JSONObject().put("mode", before),
+                after = JSONObject().put("mode", mode),
+                changed = changedOf("themeMode" to change(before, mode)),
+                message = "主题 ${themeLabel(before)} → ${themeLabel(mode)}。",
             )
         }
     }
 
     // ==================================================================
-    // 8) 限制模式（默认限制所有应用 / 只限制指定应用）
+    // 8) 限制模式（PROPOSE → SET_RESTRICT_MODE）
     // ==================================================================
 
     private inner class SetRestrictModeTool : AgentTool {
         override val name: String = "set_restrict_mode"
+        override val kind: ToolKind = ToolKind.PROPOSE
         override val description: String =
-            "切换限制模式：开启=默认限制所有第三方应用（白名单除外）；关闭=只有手动指定的应用才被限制。" +
-                "仅在用户明确要求修改时调用；只是询问时用 get_app_settings。"
+            "生成限制模式草案：开启=默认限制所有第三方应用（白名单除外）；关闭=只限制手动指定应用。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
@@ -358,31 +412,32 @@ class ControlTools(
             val enabled = arguments.boolArg("enabled")
                 ?: throw ToolArgumentException("缺少必填参数 enabled（true / false）")
             val before = settings.current().restrictByDefault
-            settings.setRestrictByDefault(enabled)
-            val after = settings.current().restrictByDefault
-            val message = if (after) {
-                "已开启默认限制：所有第三方应用默认会被限制，白名单应用除外。"
+            val summary = if (enabled) {
+                "默认限制所有第三方应用（白名单除外）"
             } else {
-                "已关闭默认限制：只有手动指定的应用才会被限制。"
+                "只限制手动指定的应用"
             }
-            return result(
-                executed = true,
-                message = message,
-                changed = changedOf("restrictByDefault" to change(before, after)),
+            return proposeDraft(
+                type = "SET_RESTRICT_MODE",
+                params = JSONObject().put("enabled", enabled),
+                before = JSONObject().put("enabled", before),
+                after = JSONObject().put("enabled", enabled),
+                changed = changedOf("restrictByDefault" to change(before, enabled)),
+                message = "限制模式 ${if (before) "默认限制" else "仅手动限制"} → $summary。",
             )
         }
     }
 
     // ==================================================================
-    // 9) 实时提示（三个都可空，只改传入项）
+    // 9) 实时提示（PROPOSE → SET_NUDGE）
     // ==================================================================
 
     private inner class SetNudgeTool : AgentTool {
         override val name: String = "set_nudge"
+        override val kind: ToolKind = ToolKind.PROPOSE
         override val description: String =
-            "调整实时提示（陪伴模式）：enabled 开关、interval_minutes 连续使用多少分钟后提示（5-120）、" +
-                "use_ai 是否用 AI 生成提示文案。三个参数都可选，只改传入项。" +
-                "仅在用户明确要求修改时调用；只是询问时用 get_app_settings。"
+            "生成实时提示草案（enabled / interval_minutes 5-120 / use_ai），只改传入项。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
@@ -397,58 +452,68 @@ class ControlTools(
             val interval = arguments.intArg("interval_minutes")
             val useAi = arguments.boolArg("use_ai")
             if (enabled == null && interval == null && useAi == null) {
-                throw ToolArgumentException(
-                    "至少提供一个参数：enabled / interval_minutes / use_ai",
-                )
+                throw ToolArgumentException("至少提供一个参数：enabled / interval_minutes / use_ai")
             }
             if (interval != null && interval !in 5..120) {
                 throw ToolArgumentException("interval_minutes 需在 5-120 之间，收到 $interval")
             }
 
             val before = settings.current()
-            enabled?.let { settings.setRealtimeNudgeEnabled(it) }
-            interval?.let { settings.setNudgeIntervalMinutes(it) }
-            useAi?.let { settings.setNudgeUseAi(it) }
-            val after = settings.current()
+            val afterEnabled = enabled ?: before.realtimeNudgeEnabled
+            val afterInterval = interval ?: before.nudgeIntervalMinutes
+            val afterUseAi = useAi ?: before.nudgeUseAi
 
+            val params = JSONObject()
+            val beforeJson = JSONObject()
+            val afterJson = JSONObject()
             val changed = JSONObject()
             if (enabled != null) {
-                changed.put("realtimeNudgeEnabled", change(before.realtimeNudgeEnabled, after.realtimeNudgeEnabled))
+                params.put("enabled", enabled)
+                beforeJson.put("enabled", before.realtimeNudgeEnabled)
+                afterJson.put("enabled", afterEnabled)
+                changed.put("realtimeNudgeEnabled", change(before.realtimeNudgeEnabled, afterEnabled))
             }
             if (interval != null) {
-                changed.put("nudgeIntervalMinutes", change(before.nudgeIntervalMinutes, after.nudgeIntervalMinutes))
+                params.put("interval_minutes", interval)
+                beforeJson.put("interval_minutes", before.nudgeIntervalMinutes)
+                afterJson.put("interval_minutes", afterInterval)
+                changed.put("nudgeIntervalMinutes", change(before.nudgeIntervalMinutes, afterInterval))
             }
             if (useAi != null) {
-                changed.put("nudgeUseAi", change(before.nudgeUseAi, after.nudgeUseAi))
+                params.put("use_ai", useAi)
+                beforeJson.put("use_ai", before.nudgeUseAi)
+                afterJson.put("use_ai", afterUseAi)
+                changed.put("nudgeUseAi", change(before.nudgeUseAi, afterUseAi))
             }
-            val message = "实时提示已更新：" +
-                "${onOff(after.realtimeNudgeEnabled)}，" +
-                "每 ${after.nudgeIntervalMinutes} 分钟提示一次，" +
-                "文案${if (after.nudgeUseAi) "使用 AI 生成" else "使用本地文案"}。"
-            return result(executed = true, message = message, changed = changed)
+            val beforeSummary = nudgeSummary(before.realtimeNudgeEnabled, before.nudgeIntervalMinutes, before.nudgeUseAi)
+            val afterSummary = nudgeSummary(afterEnabled, afterInterval, afterUseAi)
+            return proposeDraft(
+                type = "SET_NUDGE",
+                params = params,
+                before = beforeJson,
+                after = afterJson,
+                changed = changed,
+                message = "实时提示 $beforeSummary → $afterSummary。",
+            )
         }
     }
 
     // ==================================================================
-    // 10) AI 个性化
+    // 10) AI 个性化（PROPOSE → SET_AI_PERSONA）
     // ==================================================================
 
     private inner class SetAiPersonaTool : AgentTool {
         override val name: String = "set_ai_persona"
+        override val kind: ToolKind = ToolKind.PROPOSE
         override val description: String =
-            "调整 AI 助手个性化：nickname 称呼（空串=清空）、tone 语气（gentle / direct / strict）、" +
-                "focus 关注点数组（sleep / study / entertainment / efficiency，空数组=清空）、" +
-                "custom_prompt 自定义要求（空串=清空）。参数都可选，只改传入项。" +
-                "仅在用户明确要求修改时调用；只是询问时用 get_app_settings。"
+            "生成 AI 个性化草案：称呼/语气(gentle|direct|strict)/关注点/自定义要求，空值=清空，需确认。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
                 "nickname" to JsonSchema.string("AI 对你的称呼；传空串表示清空，可选"),
                 "tone" to JsonSchema.string("AI 语气", enum = listOf("gentle", "direct", "strict")),
-                "focus" to JsonSchema.stringArray(
-                    "关注点数组，可选",
-                    enum = FOCUS_KEYS,
-                ),
+                "focus" to JsonSchema.stringArray("关注点数组，可选", enum = FOCUS_KEYS),
                 "custom_prompt" to JsonSchema.string("给 AI 的额外要求；传空串表示清空，可选"),
             ),
         )
@@ -462,13 +527,9 @@ class ControlTools(
             val custom = arguments.optionalRawString("custom_prompt")
 
             if (!nicknameProvided && toneRaw == null && focus == null && !customProvided) {
-                throw ToolArgumentException(
-                    "至少提供一个参数：nickname / tone / focus / custom_prompt",
-                )
+                throw ToolArgumentException("至少提供一个参数：nickname / tone / focus / custom_prompt")
             }
-            val tone = toneRaw?.let {
-                requireEnum(it, listOf("gentle", "direct", "strict"), "tone")
-            }
+            val tone = toneRaw?.let { requireEnum(it, listOf("gentle", "direct", "strict"), "tone") }
             focus?.forEach { requireEnum(it, FOCUS_KEYS, "focus[]") }
 
             val before = settings.current()
@@ -476,61 +537,70 @@ class ControlTools(
             val newTone = tone ?: before.aiTone
             val newFocus = focus?.toSet() ?: before.aiFocus
             val newCustom = if (customProvided) custom.orEmpty() else before.aiCustomPrompt
-            settings.setAiPersona(newNickname, newTone, newFocus, newCustom)
-            val after = settings.current()
 
+            val params = JSONObject()
+            val beforeJson = JSONObject()
+            val afterJson = JSONObject()
             val changed = JSONObject()
             val parts = ArrayList<String>()
+
             if (nicknameProvided) {
-                changed.put("aiNickname", change(before.aiNickname, after.aiNickname))
-                parts.add(
-                    if (after.aiNickname.isEmpty()) "已清空称呼" else "称呼改为「${after.aiNickname}」",
-                )
+                params.put("nickname", newNickname)
+                beforeJson.put("nickname", before.aiNickname)
+                afterJson.put("nickname", newNickname)
+                changed.put("aiNickname", change(before.aiNickname, newNickname))
+                parts.add(if (newNickname.isEmpty()) "清空称呼" else "称呼改为「$newNickname」")
             }
             if (tone != null) {
-                changed.put("aiTone", change(before.aiTone, after.aiTone))
-                parts.add("语气${toneLabel(before.aiTone)}→${toneLabel(after.aiTone)}")
+                params.put("tone", tone)
+                beforeJson.put("tone", before.aiTone)
+                afterJson.put("tone", tone)
+                changed.put("aiTone", change(before.aiTone, tone))
+                parts.add("语气 ${toneLabel(before.aiTone)} → ${toneLabel(tone)}")
             }
             if (focus != null) {
-                changed.put(
-                    "aiFocus",
-                    change(JSONArray(before.aiFocus.toList()), JSONArray(after.aiFocus.toList())),
-                )
-                parts.add(
-                    if (after.aiFocus.isEmpty()) {
-                        "已清空关注点"
-                    } else {
-                        "关注点改为" + focusText(after.aiFocus)
-                    },
-                )
+                params.put("focus", JSONArray(focus))
+                beforeJson.put("focus", JSONArray(before.aiFocus.toList()))
+                afterJson.put("focus", JSONArray(newFocus.toList()))
+                changed.put("aiFocus", change(JSONArray(before.aiFocus.toList()), JSONArray(newFocus.toList())))
+                parts.add(if (newFocus.isEmpty()) "清空关注点" else "关注点改为 ${focusText(newFocus)}")
             }
             if (customProvided) {
-                changed.put("aiCustomPrompt", change(before.aiCustomPrompt, after.aiCustomPrompt))
-                parts.add(if (after.aiCustomPrompt.isEmpty()) "已清空自定义要求" else "已更新自定义要求")
+                params.put("custom_prompt", newCustom)
+                beforeJson.put("custom_prompt", before.aiCustomPrompt)
+                afterJson.put("custom_prompt", newCustom)
+                changed.put("aiCustomPrompt", change(before.aiCustomPrompt, newCustom))
+                parts.add(if (newCustom.isEmpty()) "清空自定义要求" else "更新自定义要求")
             }
-            return result(
-                executed = true,
-                message = "AI 个性化已更新：" + parts.joinToString("；") + "。",
+            return proposeDraft(
+                type = "SET_AI_PERSONA",
+                params = params,
+                before = beforeJson,
+                after = afterJson,
                 changed = changed,
+                message = "AI 个性化：" + parts.joinToString("；") + "。",
             )
         }
     }
 
     // ==================================================================
-    // 11) 应用限制（真正 block / unblock）
+    // 11) 应用限制（PROPOSE → SET_APP_RESTRICTION）
     // ==================================================================
 
     private inner class SetAppRestrictionTool : AgentTool {
         override val name: String = "set_app_restriction"
+        override val kind: ToolKind = ToolKind.PROPOSE
         override val description: String =
-            "真正限制或放行某个应用（写入限制列表，由无障碍服务执行拦截）。系统保护应用（电话/短信/设置/桌面/本应用）会被拒绝。" +
-                "若应用在白名单中且要限制它，会先把它移出白名单。" +
-                "仅在用户明确要求限制/放行某个应用时调用；只是询问时不要调用。"
+            "生成限制/放行应用草案；系统保护应用会被拒，限制白名单应用会一并移出白名单。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
-                "package_name" to JsonSchema.string("应用包名或应用名，例如 com.tencent.mm / 微信"),
-                "restricted" to JsonSchema.boolean("true=限制该应用；false=解除限制"),
+                "package_name" to JsonSchema.string(
+                    "应用包名或应用名，例如 com.tencent.mm / 微信",
+                    format = "app_ref",
+                ),
+                "restricted" to JsonSchema.boolean("true=限制该应用；false=放行该应用"),
             ),
             required = listOf("package_name", "restricted"),
         )
@@ -564,62 +634,70 @@ class ControlTools(
             val before = settings.current()
             val wasBlocked = restrictions.isBlocked(packageName)
             val whitelistedBefore = before.allowedPackages.contains(packageName)
-            var removedFromWhitelist = false
+            val effectiveBefore = EffectiveRestrictionResolver.resolve(
+                packageName = packageName,
+                allowedPackages = before.allowedPackages,
+                explicitBlocked = if (wasBlocked) setOf(packageName) else emptySet(),
+                restrictByDefault = before.restrictByDefault,
+                protectedPackages = launcherPackages,
+            )
 
-            if (restricted) {
-                // 白名单与限制冲突：先移出白名单再限制（否则白名单会覆盖限制）
-                if (whitelistedBefore) {
-                    settings.setAllowed(packageName, false)
-                    removedFromWhitelist = true
-                }
-                restrictions.block(packageName)
-            } else {
-                restrictions.unblock(packageName)
-            }
-
-            val nowBlocked = restrictions.isBlocked(packageName)
-            val whitelistedAfter = settings.current().allowedPackages.contains(packageName)
-
+            val params = JSONObject()
+                .put("package_name", packageName)
+                .put("restricted", restricted)
+            val beforeJson = JSONObject()
+                .put("package_name", packageName)
+                .put("restricted", effectiveBefore.restricted)
+                .put("whitelisted", whitelistedBefore)
+            val afterJson = JSONObject()
+                .put("package_name", packageName)
+                .put("restricted", restricted)
+                .put("whitelisted", if (restricted) false else true)
             val changed = JSONObject().apply {
-                put("restricted", change(wasBlocked, nowBlocked))
-                if (removedFromWhitelist) {
-                    put("whitelisted", change(true, whitelistedAfter))
+                put("restricted", change(effectiveBefore.restricted, restricted))
+                if (restricted && whitelistedBefore) {
+                    put("whitelisted", change(true, false))
                 }
             }
-            val message = buildString {
-                if (restricted) {
-                    append("已限制「").append(appName).append("」")
-                } else {
-                    append("已解除对「").append(appName).append("」的限制")
+            val message = if (restricted) {
+                buildString {
+                    append("限制「").append(appName).append("」")
+                    if (whitelistedBefore) append("（将移出白名单并加入手动限制）")
+                    append("；当前有效状态：").append(effectiveBefore.reason.label)
+                    append(" -> 受限。")
                 }
-                if (removedFromWhitelist) {
-                    append("；并已将它移出白名单（白名单应用不会被限制，冲突时以「限制」为准）")
-                }
-                append("。实际拦截需要无障碍服务处于开启状态。")
+            } else {
+                "放行「$appName」（移出手动限制并加入允许名单）。"
             }
-            return result(
-                executed = true,
-                message = message,
+
+            return proposeDraft(
+                type = "SET_APP_RESTRICTION",
+                params = params,
+                before = beforeJson,
+                after = afterJson,
                 changed = changed,
+                message = message,
+                packages = setOf(packageName),
                 settingsUrlHint = APPS_HINT,
             ).apply {
                 put("packageName", packageName)
                 put("appName", appName)
-                put("restricted", nowBlocked)
-                put("whitelisted", whitelistedAfter)
-                put("removedFromWhitelist", removedFromWhitelist)
+                put("requestedRestricted", restricted)
+                put("wasWhitelisted", whitelistedBefore)
             }
         }
     }
 
     // ==================================================================
-    // 12) AI 分析开关
+    // 12) AI 分析开关（PROPOSE → SET_AI_ANALYSIS_ENABLED）
     // ==================================================================
 
     private inner class SetAiAnalysisEnabledTool : AgentTool {
         override val name: String = "set_ai_analysis_enabled"
+        override val kind: ToolKind = ToolKind.PROPOSE
         override val description: String =
-            "开关 AI 分析：关闭后日报/周报只用本地规则，不消耗 token。仅在用户明确要求修改时调用；只是询问时用 get_app_settings。"
+            "生成 AI 分析开关草案：关闭后日报/周报只用本地规则，不消耗 token。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
@@ -632,66 +710,53 @@ class ControlTools(
             val enabled = arguments.boolArg("enabled")
                 ?: throw ToolArgumentException("缺少必填参数 enabled（true / false）")
             val before = settings.current().aiAnalysisEnabled
-            settings.setAiAnalysisEnabled(enabled)
-            val after = settings.current().aiAnalysisEnabled
-            val message = if (after) {
-                "已开启 AI 分析：日报/周报会调用模型生成。"
-            } else {
-                "已关闭 AI 分析：日报/周报只用本地规则，不再消耗 token。"
-            }
-            return result(
-                executed = true,
-                message = message,
-                changed = changedOf("aiAnalysisEnabled" to change(before, after)),
+            return proposeDraft(
+                type = "SET_AI_ANALYSIS_ENABLED",
+                params = JSONObject().put("enabled", enabled),
+                before = JSONObject().put("enabled", before),
+                after = JSONObject().put("enabled", enabled),
+                changed = changedOf("aiAnalysisEnabled" to change(before, enabled)),
+                message = if (enabled) "开启 AI 分析。" else "关闭 AI 分析（只用本地规则）。",
             )
         }
     }
 
     // ==================================================================
-    // 13) 刷新使用数据
+    // 13) 刷新使用数据（PROPOSE → REFRESH_USAGE_DATA）
     // ==================================================================
 
     private inner class RefreshUsageDataTool : AgentTool {
         override val name: String = "refresh_usage_data"
+        override val kind: ToolKind = ToolKind.PROPOSE
         override val description: String =
-            "立即同步一次手机使用数据（读取系统 UsageEvents 并更新统计）。" +
-                "仅在用户明确要求刷新/同步数据时调用；只是询问数据时用 get_daily_usage 等查询工具。"
+            "生成立即同步使用数据的草案；仅用户明确要求刷新/同步时用。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(properties = emptyList())
 
         override suspend fun execute(arguments: JSONObject): JSONObject {
-            if (!usage.hasUsageAccess()) {
-                return result(
-                    executed = false,
-                    message = "尚未获得「使用情况访问」权限，无法同步数据；请先到系统设置授权后再试。",
-                    settingsUrlHint = SETTINGS_HINT,
-                ).apply {
-                    put("ok", false)
-                    put("sessions", 0)
-                }
-            }
-            val ingest = usage.refresh()
-            return result(
-                executed = true,
-                message = "已同步使用数据：本次处理 ${ingest.sessions} 段会话，覆盖 ${ingest.daysTouched} 天。",
+            return proposeDraft(
+                type = "REFRESH_USAGE_DATA",
+                params = JSONObject(),
+                before = JSONObject(),
+                after = JSONObject(),
+                changed = JSONObject(),
+                message = "确认后将立即同步一次手机使用数据。",
                 settingsUrlHint = DASHBOARD_HINT,
-            ).apply {
-                put("ok", ingest.hasAccess)
-                put("sessions", ingest.sessions)
-                put("daysTouched", ingest.daysTouched)
-            }
+            )
         }
     }
 
     // ==================================================================
-    // 14) 立即生成报告
+    // 14) 立即生成报告（CONTROL，本地结果保存，直接执行）
     // ==================================================================
 
     private inner class GenerateReportNowTool : AgentTool {
         override val name: String = "generate_report_now"
+        override val kind: ToolKind = ToolKind.CONTROL
         override val description: String =
-            "立即生成一份使用报告（daily=日报，weekly=周报）并保存，来源可能是 AI 或本地规则。" +
-                "仅在用户明确要求现在生成报告时调用；只是查看已有报告时不要调用。"
+            "立即生成并保存日报/周报（AI 或本地规则），不改设置、无需确认；仅对话可用。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
             properties = listOf(
@@ -731,14 +796,15 @@ class ControlTools(
     }
 
     // ==================================================================
-    // 15) 测试通知
+    // 15) 测试通知（CONTROL，瞬时通知，直接执行）
     // ==================================================================
 
     private inner class SendTestNotificationTool : AgentTool {
         override val name: String = "send_test_notification"
+        override val kind: ToolKind = ToolKind.CONTROL
         override val description: String =
-            "发送一条系统测试通知，用于验证通知权限与渠道是否正常。" +
-                "仅在用户明确要求发送测试通知时调用；只是询问通知设置时用 get_app_settings。"
+            "发送一条系统测试通知（不改设置、无需确认），仅对话可用。"
+
 
         override val parameters: JSONObject = JsonSchema.objectSchema(properties = emptyList())
 
@@ -764,8 +830,58 @@ class ControlTools(
     }
 
     // ==================================================================
-    // 通知实现（NotificationHelper 没有测试入口，这里只用它的公开 helper 做权限/渠道，
-    // 再直接 post 一条测试通知；避免被「日报渠道关闭 / 免打扰 / 10 分钟去重」拦截导致测试失败）
+    // 待确认草案
+    // ==================================================================
+
+    /**
+     * 生成 PENDING 待确认草案（不写任何业务配置）。
+     * 返回统一结构；用户确认后由 ActionExecutor 按保存的参数执行。
+     */
+    private suspend fun proposeDraft(
+        type: String,
+        params: JSONObject,
+        before: JSONObject,
+        after: JSONObject,
+        changed: JSONObject,
+        message: String,
+        packages: Set<String> = emptySet(),
+        settingsUrlHint: String = CONFIRM_HINT,
+    ): JSONObject {
+        val drafts = runCatching { actionDraftsProvider() }.getOrElse {
+            throw ToolArgumentException("待确认操作服务尚未就绪，请稍后再试。")
+        }
+        val taskId = runCatching { taskIdProvider() }.getOrDefault("").ifBlank { "agent-task" }
+        val entity = runCatching {
+            drafts.propose(
+                taskId = taskId,
+                type = type,
+                packages = packages,
+                paramsJson = params.toString(),
+                beforeJson = before.toString(),
+                afterJson = after.toString(),
+            )
+        }.getOrElse {
+            throw ToolArgumentException("生成待确认操作失败：${it.message?.take(120) ?: "未知错误"}")
+        }
+
+        return JSONObject().apply {
+            put("executed", false)
+            put("requiresConfirmation", true)
+            put("opId", entity.opId)
+            put("type", entity.type)
+            put("status", entity.status)
+            put("expiresAt", entity.expiresAt)
+            put("changed", changed)
+            put("before", before)
+            put("after", after)
+            put("message", "已生成待确认操作：$message 请在应用内确认后生效。")
+            put("settingsUrlHint", settingsUrlHint)
+        }
+    }
+
+    // ==================================================================
+    // 通知实现（NotificationHelper 没有测试入口，这里只借用它的公开 helper
+    // 做权限/渠道检查，再直接 post 一条测试通知，避免被开关/免打扰/去重拦截）
     // ==================================================================
 
     @SuppressLint("MissingPermission")
@@ -780,7 +896,7 @@ class ControlTools(
             intent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val body = "如果你看到这条通知，说明通知功能正常：AI 助手可以按你的要求调控本 App 并给你发通知。"
+        val body = "如果你看到这条通知，说明通知功能正常：AI 助手可以按你的要求生成待确认操作并给你发通知。"
         val notification = NotificationCompat.Builder(context, NotificationHelper.CHANNEL_AI_REPORT)
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentTitle("UsageGuard 测试通知")
@@ -830,6 +946,9 @@ class ControlTools(
 
     private fun onOff(value: Boolean): String = if (value) "开启" else "关闭"
 
+    private fun nudgeSummary(enabled: Boolean, intervalMinutes: Int, useAi: Boolean): String =
+        "${onOff(enabled)}，每 $intervalMinutes 分钟，${if (useAi) "AI 文案" else "本地文案"}"
+
     private fun reminderStyleLabel(style: String): String = when (style) {
         AppSettings.STYLE_STRICT -> "严格"
         else -> "温和"
@@ -857,17 +976,6 @@ class ControlTools(
 
     private fun focusText(focus: Set<String>): String = focus.map { focusLabel(it) }.joinToString("、")
 
-    private suspend fun applyChannel(key: String, enabled: Boolean) {
-        when (key) {
-            "daily_reminder" -> settings.setNotifyDailyReminder(enabled)
-            "goal_exceeded" -> settings.setNotifyGoalExceeded(enabled)
-            "anomaly" -> settings.setNotifyAnomaly(enabled)
-            "daily_summary" -> settings.setNotifyDailySummary(enabled)
-            "weekly_summary" -> settings.setNotifyWeeklySummary(enabled)
-            else -> throw ToolArgumentException("未知通知渠道：$key")
-        }
-    }
-
     private fun channelValue(prefs: AppSettings, key: String): Boolean = when (key) {
         "daily_reminder" -> prefs.notifyDailyReminder
         "goal_exceeded" -> prefs.notifyGoalExceeded
@@ -887,17 +995,17 @@ class ControlTools(
     }
 }
 
-
 // ======================================================================
-// 文件级常量
-// 放在类外（而不是 companion object）是为了让 inner class 里也能无歧义解析，
-// 同时避免 companion 初始化顺序带来的坑。
+// 文件级常量（放在类外，避免 inner class 里 companion 作用域解析歧义）
 // ======================================================================
 
 private const val SETTINGS_HINT = "可在「设置」页查看"
 private const val APPS_HINT = "可在「应用」页查看暂停状态"
 private const val REPORT_HINT = "可在「报告」页查看"
 private const val DASHBOARD_HINT = "可在「首页」查看最新数据"
+
+/** 草案提示：5 分钟内有效，需要用户在应用内确认（方案 §10.2） */
+private const val CONFIRM_HINT = "请在应用内确认（草案 5 分钟内有效）"
 
 /** 测试通知 id，避开 NotificationHelper 的 1001-1005 固定 id */
 private const val TEST_NOTIFICATION_ID = 1099

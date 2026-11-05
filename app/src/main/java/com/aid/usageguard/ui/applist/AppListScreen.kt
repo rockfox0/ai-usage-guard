@@ -29,8 +29,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -57,9 +59,12 @@ import com.aid.usageguard.ui.vmFactory
  *      + [Container.usage].todayRanking()（今日分钟数），由 [AppListViewModel] 合并。
  *
  * 限制语义随模式切换（见 [AppListUiState.modeText]）：
- * - 默认限制：开关 = 「允许」，checked 表示是否在白名单（[Container.settings].setAllowed）；
- * - 仅限制指定：开关 = 「暂停」，checked 表示是否被手动限制（[Container.restrictions].block/unblock）；
- * - 系统关键应用开关置灰，永不被限制。
+ * - 超额后才限制（QUOTA_AFTER_BUDGET，默认）：额度内所有应用可用，开关 = 「允许」，
+ *   checked 表示是否在白名单（超额后仍可用的通行证，[Container.settings].setAllowed）；
+ * - 始终限制非白名单（ALWAYS_NON_WHITELIST）：同样用白名单开关；
+ * - 只限制指定应用（MANUAL_ONLY）：开关 = 「暂停」，checked 表示是否被手动限制
+ *   （[Container.restrictions].block/unblock）；
+ * - 单应用每日限额在任何模式下独立生效；系统关键应用开关置灰，永不被限制。
  */
 @Composable
 fun AppListScreen(onOpenAppDetail: (String) -> Unit) {
@@ -70,6 +75,8 @@ fun AppListScreen(onOpenAppDetail: (String) -> Unit) {
                 usage = Container.usage,
                 settings = Container.settings,
                 restrictions = Container.restrictions,
+                quota = Container.quota,
+                whitelist = Container.whitelist,
             )
         },
     )
@@ -138,6 +145,14 @@ fun AppListScreen(onOpenAppDetail: (String) -> Unit) {
         state.error?.let { message ->
             NoticeRow(text = message, isError = true)
         }
+        // 白名单添加结果（成功 / 达到每日上限被拒）
+        state.notice?.let { notice ->
+            NoticeRow(
+                text = notice,
+                isError = state.noticeIsError,
+                onDismiss = viewModel::dismissNotice,
+            )
+        }
 
         Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
             when {
@@ -183,7 +198,11 @@ fun AppListScreen(onOpenAppDetail: (String) -> Unit) {
 }
 
 @Composable
-private fun NoticeRow(text: String, isError: Boolean) {
+private fun NoticeRow(
+    text: String,
+    isError: Boolean,
+    onDismiss: (() -> Unit)? = null,
+) {
     val colors = MaterialTheme.colorScheme
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
@@ -209,7 +228,13 @@ private fun NoticeRow(text: String, isError: Boolean) {
                 color = if (isError) colors.onErrorContainer else colors.onSurfaceVariant,
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
             )
+            if (onDismiss != null) {
+                TextButton(onClick = onDismiss) {
+                    Text("知道了", fontSize = 11.sp)
+                }
+            }
         }
     }
 }
@@ -225,6 +250,7 @@ private fun AppRow(
     val statusColor = when {
         app.systemProtected -> colors.onSurfaceVariant
         app.whitelisted -> colors.primary
+        app.focusActive -> colors.error
         app.restricted && !app.byDefault -> colors.error
         else -> colors.onSurfaceVariant
     }
@@ -242,14 +268,32 @@ private fun AppRow(
             AppIcon(packageName = app.packageName)
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = app.appName,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = colors.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = app.appName,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = colors.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    app.dailyLimitMinutes?.let { limit ->
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            color = colors.secondary.copy(alpha = 0.18f),
+                            contentColor = colors.secondary,
+                            shape = RoundedCornerShape(6.dp),
+                        ) {
+                            Text(
+                                text = "限额 $limit 分钟",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                            )
+                        }
+                    }
+                }
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = buildString {

@@ -22,11 +22,16 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -37,10 +42,14 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -49,18 +58,21 @@ import com.aid.usageguard.agent.memory.AgentMemory
 import com.aid.usageguard.data.Container
 import com.aid.usageguard.domain.model.ChatMessageModel
 import com.aid.usageguard.ui.MarkdownLiteText
+import com.aid.usageguard.ui.actions.PendingActionItem
 import com.aid.usageguard.ui.vmFactory
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /**
- * AI 助手聊天页。
+ * AI 助手聊天页（v1.7 方案 §7 上下文 + §8.3 流式展示）。
  *
- * - 根壳已经套了 UsageGuardTheme 与安全区 insets，这里只处理 IME 弹出时的底部避让；
- * - 消息气泡区分用户/助手，助手气泡下展示「本次调用过的工具名」；
- * - 发送中显示加载态与实时工具名，可「停止」取消（协程取消会连带取消 OkHttp 请求）；
- * - 空态给出示例问题，右上角可清空对话（同时清空 Room agent_message）。
+ * - 顶部上下文 chip：「正在分析：{应用} · 最近 N 天」，提交前可切换/清除，
+ *   提交瞬间快照成 AgentContext 传给 chat()，之后 chip 改动不影响已提交任务；
+ * - 消息流：普通气泡 + 流式气泡（TextDelta 增量）+ 工具状态小字 +
+ *   ActionProposed 插入的待确认卡片（与设置页同样式，确认后才真正执行）；
+ * - 「停止」调用 AgentRuntime.cancelCurrent()；
+ * - 根壳已经套了 UsageGuardTheme 与安全区 insets，这里只处理 IME 底部避让。
  */
 @Composable
 fun AssistantScreen(
@@ -71,6 +83,10 @@ fun AssistantScreen(
                 runtime = Container.agentRuntime,
                 memory = AgentMemory(Container.db.agentMessageDao()),
                 settings = Container.settings,
+                usage = Container.usage,
+                usageSource = Container.usageSource,
+                actionDrafts = Container.actionDrafts,
+                actionExecutor = Container.actionExecutor,
             )
         },
     ),
@@ -79,18 +95,27 @@ fun AssistantScreen(
     val listState = rememberLazyListState()
     val colors = MaterialTheme.colorScheme
 
-    // 新消息 / 发送状态变化时滚到底部（发送中底部还有一个「正在思考」气泡）
-    LaunchedEffect(state.messages.size, state.sending) {
-        val lastIndex = state.messages.size + if (state.sending) 1 else 0
-        if (lastIndex > 0) listState.animateScrollToItem(lastIndex - 1)
+    // 新消息 / 流式气泡出现时滚到底部
+    val timelineItems = state.messages.size + state.actionCards.size +
+        if (state.streamingText.isNotBlank() || state.sending) 1 else 0
+    LaunchedEffect(timelineItems, state.sending, state.streamingText.isNotEmpty()) {
+        if (timelineItems > 0) listState.animateScrollToItem(timelineItems - 1)
     }
 
     Column(modifier = modifier.fillMaxSize().imePadding()) {
         AssistantHeader(
             configured = state.configured,
             modelLabel = state.modelLabel,
-            canClear = state.messages.isNotEmpty() && !state.sending,
+            canClear = state.hasConversation && !state.sending,
             onClear = viewModel::clear,
+        )
+
+        ContextBar(
+            state = state,
+            enabled = !state.sending,
+            onPickApp = viewModel::setFocus,
+            onClearFocus = viewModel::clearFocus,
+            onRangeDays = viewModel::setRangeDays,
         )
 
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -102,7 +127,7 @@ fun AssistantScreen(
                     CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
                 }
 
-                state.messages.isEmpty() -> AssistantEmptyState(onPick = viewModel::onInputChange)
+                !state.hasConversation -> AssistantEmptyState(onPick = viewModel::onInputChange)
 
                 else -> LazyColumn(
                     state = listState,
@@ -113,8 +138,28 @@ fun AssistantScreen(
                     items(state.messages, key = { it.id }) { message ->
                         MessageBubble(message = message)
                     }
-                    if (state.sending) {
-                        item(key = "thinking") { ThinkingBubble(liveTool = state.liveTool) }
+                    state.actionCards.forEach { card ->
+                        item(key = "action_${card.opId}") {
+                            PendingActionItem(
+                                ui = card,
+                                onConfirm = { viewModel.confirmAction(card.opId) },
+                                onCancel = { viewModel.cancelAction(card.opId) },
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                            )
+                        }
+                    }
+                    when {
+                        state.streamingText.isNotBlank() -> item(key = "streaming") {
+                            StreamingBubble(
+                                text = state.streamingText,
+                                toolStatus = state.toolStatus,
+                                streaming = state.sending,
+                            )
+                        }
+
+                        state.sending -> item(key = "thinking") {
+                            ThinkingBubble(toolStatus = state.toolStatus)
+                        }
                     }
                 }
             }
@@ -125,7 +170,7 @@ fun AssistantScreen(
             ErrorNotice(text = error, onDismiss = viewModel::dismissError)
         }
 
-        if (!state.configured && state.messages.isEmpty() && !state.loadingHistory) {
+        if (!state.configured && !state.hasConversation && !state.loadingHistory) {
             Text(
                 text = "未配置模型接口时无法对话：请到「设置 → AI 接口」填写 BaseURL 与 API Key。",
                 fontSize = 11.sp,
@@ -143,6 +188,8 @@ fun AssistantScreen(
     }
 }
 
+// ---------------------------------------------------------------- 顶部 / 上下文
+
 @Composable
 private fun AssistantHeader(
     configured: Boolean,
@@ -154,7 +201,7 @@ private fun AssistantHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 6.dp),
+            .padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
@@ -174,6 +221,107 @@ private fun AssistantHeader(
         }
     }
 }
+
+/** 顶部上下文 chip：「正在分析：{应用} · 最近 N 天」+ 范围切换（提交前可改） */
+@Composable
+private fun ContextBar(
+    state: AssistantUiState,
+    enabled: Boolean,
+    onPickApp: (AssistantAppChoice?) -> Unit,
+    onClearFocus: () -> Unit,
+    onRangeDays: (Int) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    var appMenuOpen by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(modifier = Modifier.weight(1f)) {
+                FilterChip(
+                    selected = state.hasFocus,
+                    onClick = { appMenuOpen = true },
+                    enabled = enabled,
+                    label = {
+                        Text(
+                            text = state.contextChipLabel,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    trailingIcon = {
+                        Icon(
+                            imageVector = if (state.hasFocus) Icons.Filled.Close else Icons.Filled.ArrowDropDown,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    },
+                )
+                DropdownMenu(
+                    expanded = appMenuOpen,
+                    onDismissRequest = { appMenuOpen = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("全部应用", fontSize = 12.sp) },
+                        onClick = {
+                            appMenuOpen = false
+                            onPickApp(null)
+                        },
+                    )
+                    state.appChoices.forEach { choice ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "${choice.appName} · 今日 ${choice.minutes} 分钟",
+                                    fontSize = 12.sp,
+                                )
+                            },
+                            onClick = {
+                                appMenuOpen = false
+                                onPickApp(choice)
+                            },
+                        )
+                    }
+                    if (state.appChoices.isEmpty()) {
+                        DropdownMenuItem(
+                            text = { Text("今日还没有使用记录", fontSize = 12.sp) },
+                            onClick = { appMenuOpen = false },
+                        )
+                    }
+                }
+            }
+            if (state.hasFocus) {
+                TextButton(onClick = onClearFocus, enabled = enabled) {
+                    Text("清除", fontSize = 11.sp)
+                }
+            }
+        }
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AssistantViewModel.RANGE_CHOICES.forEach { days ->
+                FilterChip(
+                    selected = state.rangeDays == days,
+                    onClick = { onRangeDays(days) },
+                    enabled = enabled,
+                    label = { Text("$days 天", fontSize = 11.sp) },
+                )
+            }
+            if (state.sending && state.activeContextLabel != null) {
+                Text(
+                    text = "本次任务上下文已固定",
+                    fontSize = 10.sp,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- 消息流
 
 @Composable
 private fun AssistantEmptyState(onPick: (String) -> Unit) {
@@ -200,7 +348,7 @@ private fun AssistantEmptyState(onPick: (String) -> Unit) {
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = "我可以查询你的使用统计、分析异常行为，并给出具体建议。" +
-                        "我只能「建议」限制某个 App，不会直接替你限制。",
+                        "涉及修改设置的操作，我会先给出「待确认」草案，你确认后才会生效。",
                     fontSize = 12.sp,
                     color = colors.onSurfaceVariant,
                     lineHeight = 18.sp,
@@ -284,8 +432,50 @@ private fun MessageBubble(message: ChatMessageModel) {
     }
 }
 
+/** 流式回答气泡：TextDelta 累计文本 + 工具状态小字（还在流式时显示光标） */
 @Composable
-private fun ThinkingBubble(liveTool: String?) {
+private fun StreamingBubble(text: String, toolStatus: String?, streaming: Boolean) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.Start,
+    ) {
+        Column(modifier = Modifier.widthIn(max = 300.dp)) {
+            Surface(
+                color = colors.surface,
+                contentColor = colors.onSurface,
+                shape = RoundedCornerShape(18.dp, 18.dp, 18.dp, 6.dp),
+                tonalElevation = 1.dp,
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                    MarkdownLiteText(
+                        text = text,
+                        fontSize = 13.sp,
+                        lineHeight = 20.sp,
+                        color = colors.onSurface,
+                    )
+                    if (streaming) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(text = "▍", fontSize = 11.sp, color = colors.primary)
+                    }
+                }
+            }
+            if (toolStatus != null) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = toolStatus,
+                    fontSize = 10.sp,
+                    color = colors.primary,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThinkingBubble(toolStatus: String?) {
     val colors = MaterialTheme.colorScheme
     Row(
         modifier = Modifier
@@ -310,7 +500,7 @@ private fun ThinkingBubble(liveTool: String?) {
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = if (liveTool != null) "正在调用工具：$liveTool" else "正在思考…",
+                    text = toolStatus ?: "正在思考…",
                     fontSize = 12.sp,
                     color = colors.onSurfaceVariant,
                 )
@@ -373,10 +563,11 @@ private fun InputBar(
         if (state.sending) {
             FilledTonalButton(
                 onClick = onStop,
+                enabled = !state.stopping,
                 shape = RoundedCornerShape(18.dp),
                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
             ) {
-                Text("停止", fontSize = 12.sp)
+                Text(if (state.stopping) "停止中…" else "停止", fontSize = 12.sp)
             }
         } else {
             Button(

@@ -4,6 +4,7 @@ import com.aid.usageguard.data.db.AppDatabase
 import com.aid.usageguard.data.db.DailyScoreEntity
 import com.aid.usageguard.data.settings.AppSettings
 import com.aid.usageguard.data.settings.SettingsRepository
+import com.aid.usageguard.domain.model.DataStatus
 import com.aid.usageguard.domain.model.SessionSlice
 import com.aid.usageguard.domain.score.ScorePersona
 import com.aid.usageguard.domain.score.SlotMinutes
@@ -68,6 +69,8 @@ class ScoreRepository(
                 launchCount = score.launchCount,
                 slotsJson = slotsToJson(score.slots),
                 updatedAt = System.currentTimeMillis(),
+                algorithmVersion = ALGORITHM_VERSION,
+                dataStatus = score.dataStatus,
             ),
         )
         score
@@ -76,8 +79,10 @@ class ScoreRepository(
     /** 最近 [days] 天（含今天）的一周总结 */
     suspend fun week(days: Int = 7): WeekScore = withContext(Dispatchers.IO) {
         val prefs = settings.current()
-        val list = (days - 1 downTo 0).map { offset -> scoreFor(dateOffset(offset)) }
-        UsageScoreEngine.week(list, personaOf(prefs))
+        val all = (days - 1 downTo 0).map { offset -> scoreFor(dateOffset(offset)) }
+        // 只有有效数据参与周平均，缺失日期不能按满分抬高平均（方案 4.4）
+        val valid = all.filter { it.scoreAvailable }
+        UsageScoreEngine.week(valid, personaOf(prefs))
     }
 
     /** 已落库的历史分数（新→旧） */
@@ -108,6 +113,19 @@ class ScoreRepository(
         val rankingMinutes = ranking.sumOf { it.minutes }
         val totalMinutes = if (sessionMinutes > 0) sessionMinutes else rankingMinutes
 
+        val today = today()
+        val coverage = runCatching { usage.coverage(date, date) }.getOrNull()
+        val dataStatus = when {
+            coverage == null -> if (sessions.isNotEmpty()) DataStatus.VALID.name else DataStatus.NOT_SYNCED.name
+            coverage.status == DataStatus.NO_PERMISSION -> DataStatus.NO_PERMISSION.name
+            coverage.status == DataStatus.NOT_SYNCED -> DataStatus.NOT_SYNCED.name
+            coverage.status == DataStatus.FAILED -> DataStatus.FAILED.name
+            sessions.isEmpty() && totalMinutes == 0L -> DataStatus.NOT_SYNCED.name
+            coverage.validDates.isEmpty() && date == today -> DataStatus.NOT_SYNCED.name
+            coverage.status == DataStatus.PARTIAL -> DataStatus.PARTIAL.name
+            else -> DataStatus.VALID.name
+        }
+
         return UsageSnapshot(
             date = date,
             totalMinutes = totalMinutes,
@@ -117,6 +135,7 @@ class ScoreRepository(
             launchCount = launches,
             slots = slotMillis.mapValues { (_, millis) -> millis / 60_000L },
             topApps = ranking.take(3).map { it.appName to it.minutes },
+            dataStatus = dataStatus,
         )
     }
 
@@ -159,3 +178,6 @@ class ScoreRepository(
         slots.forEach { put(it.slot.key, it.minutes) }
     }.toString()
 }
+
+/** 评分算法版本：写入 daily_score，便于区分旧算法记录 */
+const val ALGORITHM_VERSION = 1

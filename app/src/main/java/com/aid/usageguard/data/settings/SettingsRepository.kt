@@ -12,6 +12,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import com.aid.usageguard.restriction.RestrictionMode
 
 private val Context.appSettingsStore: DataStore<Preferences> by preferencesDataStore(name = "app_settings")
 
@@ -33,8 +34,29 @@ data class AppSettings(
     val notifyDailySummary: Boolean = true,
     val notifyWeeklySummary: Boolean = true,
     val themeMode: String = THEME_SYSTEM,
-    /** 限制模式：true=默认限制所有应用（白名单除外），false=只限制手动指定的应用 */
-    val restrictByDefault: Boolean = true,
+    /** 每日目标是否作为硬额度：true=超过后拦截所有非白名单应用（v1.8） */
+    val dailyBudgetEnforced: Boolean = true,
+    /**
+     * 限制模式（v1.8.1）：
+     * QUOTA_AFTER_BUDGET=额度内全放行、超额后只允许白名单（默认）；
+     * ALWAYS_NON_WHITELIST=始终拦非白名单；
+     * MANUAL_ONLY=只拦手动指定。
+     */
+    val restrictionMode: String = RestrictionMode.QUOTA_AFTER_BUDGET.name,
+    /** 是否启用专注时段（时段内只能用白名单应用） */
+    val focusWindowEnabled: Boolean = false,
+    /** 专注时段开始小时（0-23，支持跨午夜） */
+    val focusWindowStart: Int = 22,
+    /** 专注时段结束小时（0-23） */
+    val focusWindowEnd: Int = 7,
+    /** 每天最多能把几个应用加入白名单（0 = 不限制；默认 1，防止随手放行） */
+    val whitelistDailyLimit: Int = 1,
+    /** 白名单添加计数所属日期（yyyy-MM-dd），用于跨天重置 */
+    val whitelistAddDate: String = "",
+    /** 当天已添加白名单数量 */
+    val whitelistAddCount: Int = 0,
+    /** 由 [restrictionMode] 派生的兼容布尔：仅当模式为「始终限制」时为 true */
+    val restrictByDefault: Boolean = false,
     /** 白名单：始终允许使用、永不被限制的应用 */
     val allowedPackages: Set<String> = emptySet(),
 
@@ -102,6 +124,14 @@ class SettingsRepository(private val context: Context) {
         val NOTIFY_WEEKLY_SUMMARY = booleanPreferencesKey("notify_weekly_summary")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val RESTRICT_BY_DEFAULT = booleanPreferencesKey("restrict_by_default")
+        val DAILY_BUDGET_ENFORCED = booleanPreferencesKey("daily_budget_enforced")
+        val RESTRICTION_MODE = stringPreferencesKey("restriction_mode")
+        val FOCUS_WINDOW_ENABLED = booleanPreferencesKey("focus_window_enabled")
+        val FOCUS_WINDOW_START = intPreferencesKey("focus_window_start")
+        val FOCUS_WINDOW_END = intPreferencesKey("focus_window_end")
+        val WHITELIST_DAILY_LIMIT = intPreferencesKey("whitelist_daily_limit")
+        val WHITELIST_ADD_DATE = stringPreferencesKey("whitelist_add_date")
+        val WHITELIST_ADD_COUNT = intPreferencesKey("whitelist_add_count")
         val AI_NICKNAME = stringPreferencesKey("ai_nickname")
         val AI_TONE = stringPreferencesKey("ai_tone")
         val AI_FOCUS = stringSetPreferencesKey("ai_focus")
@@ -132,7 +162,25 @@ class SettingsRepository(private val context: Context) {
             notifyDailySummary = prefs[Keys.NOTIFY_DAILY_SUMMARY] ?: defaults.notifyDailySummary,
             notifyWeeklySummary = prefs[Keys.NOTIFY_WEEKLY_SUMMARY] ?: defaults.notifyWeeklySummary,
             themeMode = prefs[Keys.THEME_MODE] ?: defaults.themeMode,
-            restrictByDefault = prefs[Keys.RESTRICT_BY_DEFAULT] ?: defaults.restrictByDefault,
+            restrictionMode = (
+                prefs[Keys.RESTRICTION_MODE]
+                    ?: RestrictionMode.fromLegacy(
+                        prefs[Keys.RESTRICT_BY_DEFAULT] ?: defaults.restrictByDefault,
+                    ).name
+                ),
+            restrictByDefault = RestrictionMode.parse(
+                prefs[Keys.RESTRICTION_MODE]
+                    ?: RestrictionMode.fromLegacy(
+                        prefs[Keys.RESTRICT_BY_DEFAULT] ?: defaults.restrictByDefault,
+                    ).name,
+            ) == RestrictionMode.ALWAYS_NON_WHITELIST,
+            focusWindowEnabled = prefs[Keys.FOCUS_WINDOW_ENABLED] ?: defaults.focusWindowEnabled,
+            focusWindowStart = prefs[Keys.FOCUS_WINDOW_START] ?: defaults.focusWindowStart,
+            focusWindowEnd = prefs[Keys.FOCUS_WINDOW_END] ?: defaults.focusWindowEnd,
+            whitelistDailyLimit = prefs[Keys.WHITELIST_DAILY_LIMIT] ?: defaults.whitelistDailyLimit,
+            whitelistAddDate = prefs[Keys.WHITELIST_ADD_DATE] ?: defaults.whitelistAddDate,
+            whitelistAddCount = prefs[Keys.WHITELIST_ADD_COUNT] ?: defaults.whitelistAddCount,
+            dailyBudgetEnforced = prefs[Keys.DAILY_BUDGET_ENFORCED] ?: defaults.dailyBudgetEnforced,
             allowedPackages = prefs[Keys.ALLOWED_PACKAGES] ?: defaults.allowedPackages,
             aiNickname = prefs[Keys.AI_NICKNAME] ?: defaults.aiNickname,
             aiTone = prefs[Keys.AI_TONE] ?: defaults.aiTone,
@@ -179,8 +227,20 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setThemeMode(mode: String) = edit { it[Keys.THEME_MODE] = mode }
 
+    suspend fun setDailyBudgetEnforced(enabled: Boolean) =
+        edit { it[Keys.DAILY_BUDGET_ENFORCED] = enabled }
+
+    /** 兼容旧接口：true → 始终限制；false → 只限制指定应用 */
     suspend fun setRestrictByDefault(enabled: Boolean) =
-        edit { it[Keys.RESTRICT_BY_DEFAULT] = enabled }
+        setRestrictionMode(
+            if (enabled) RestrictionMode.ALWAYS_NON_WHITELIST else RestrictionMode.MANUAL_ONLY,
+        )
+
+    suspend fun setRestrictionMode(mode: RestrictionMode) = edit {
+        it[Keys.RESTRICTION_MODE] = mode.name
+        // 同步旧键，保证仍读布尔值的地方（AI 工具/历史页面）语义一致
+        it[Keys.RESTRICT_BY_DEFAULT] = mode == RestrictionMode.ALWAYS_NON_WHITELIST
+    }
 
     /** 首次升级到「默认限制」模式时，把已安装的通讯/办公类应用加入白名单，避免误伤必要工具 */
     suspend fun seedAllowlistOnce(candidates: Collection<String>) {
@@ -210,6 +270,26 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setNudgeUseAi(enabled: Boolean) =
         edit { it[Keys.NUDGE_USE_AI] = enabled }
+
+    suspend fun setFocusWindow(enabled: Boolean, startHour: Int, endHour: Int) = edit {
+        it[Keys.FOCUS_WINDOW_ENABLED] = enabled
+        it[Keys.FOCUS_WINDOW_START] = startHour.coerceIn(0, 23)
+        it[Keys.FOCUS_WINDOW_END] = endHour.coerceIn(0, 23)
+    }
+
+    suspend fun setWhitelistDailyLimit(limit: Int) =
+        edit { it[Keys.WHITELIST_DAILY_LIMIT] = limit.coerceIn(0, 20) }
+
+    /** 记录一次白名单添加（日期变化时先重置计数） */
+    suspend fun recordWhitelistAdd(today: String, currentCount: Int) = edit {
+        it[Keys.WHITELIST_ADD_DATE] = today
+        it[Keys.WHITELIST_ADD_COUNT] = currentCount + 1
+    }
+
+    suspend fun resetWhitelistAddCounter(today: String) = edit {
+        it[Keys.WHITELIST_ADD_DATE] = today
+        it[Keys.WHITELIST_ADD_COUNT] = 0
+    }
 
     suspend fun setAllowed(packageName: String, allowed: Boolean) =
         context.appSettingsStore.edit { prefs ->

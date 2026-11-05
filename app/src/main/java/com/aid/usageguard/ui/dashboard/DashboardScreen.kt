@@ -372,6 +372,26 @@ private fun TodayCard(state: DashboardUiState) {
                     Text("已超目标", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = colors.error)
                 }
             }
+            if (state.targetMinutes > 0L || state.focusWindowActive) {
+                Spacer(modifier = Modifier.height(4.dp))
+                val quotaText = when {
+                    state.isOverGoal && state.afterBudgetOnlyWhitelist ->
+                        "额度已用完，仅白名单可用"
+                    state.isOverGoal -> "今日额度已用完"
+                    state.targetMinutes > 0L ->
+                        "额度剩余 ${formatMinutes((state.targetMinutes - state.todayMinutes).coerceAtLeast(0L))}"
+                    else -> ""
+                }
+                Text(
+                    text = when {
+                        state.focusWindowActive && quotaText.isNotBlank() -> "$quotaText · 专注时段生效中"
+                        state.focusWindowActive -> "专注时段生效中（仅白名单可用）"
+                        else -> quotaText
+                    },
+                    fontSize = 11.sp,
+                    color = if (state.isOverGoal) colors.error else colors.onSurfaceVariant,
+                )
+            }
         }
     }
 }

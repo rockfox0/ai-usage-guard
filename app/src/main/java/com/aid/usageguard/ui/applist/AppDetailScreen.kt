@@ -15,26 +15,34 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -66,6 +74,8 @@ fun AppDetailScreen(packageName: String, onBack: () -> Unit) {
                 usage = Container.usage,
                 settings = Container.settings,
                 restrictions = Container.restrictions,
+                quota = Container.quota,
+                whitelist = Container.whitelist,
             )
         },
     )
@@ -127,6 +137,21 @@ fun AppDetailScreen(packageName: String, onBack: () -> Unit) {
                             appName = detail?.appName ?: packageName,
                             state = state,
                             onSwitch = { checked -> viewModel.setSwitch(checked) },
+                        )
+                    }
+                    state.notice?.let { notice ->
+                        item(key = "notice") {
+                            DetailNoticeCard(
+                                text = notice,
+                                isError = state.noticeIsError,
+                                onDismiss = { viewModel.dismissNotice() },
+                            )
+                        }
+                    }
+                    item(key = "daily_limit") {
+                        DailyLimitCard(
+                            state = state,
+                            onSave = { minutes -> viewModel.setQuota(minutes) },
                         )
                     }
                     if (detail == null) {
@@ -235,6 +260,187 @@ private fun AppHeaderCard(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------- 每日限额（v1.8）
+
+/**
+ * 单应用每日限额：显示今日已用 / 剩余，并提供「不限 / 15 / 30 / 60 / 90 / 120 / 180 / 240 / 自定义」。
+ * 保存调 Container.quota.setLimit(pkg, minutes)，0 = 清除限额。
+ */
+@Composable
+private fun DailyLimitCard(state: AppDetailUiState, onSave: (Int) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    var showCustomDialog by remember { mutableStateOf(false) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = colors.surface),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "每日限额",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colors.onSurface,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = if (state.quotaSaving) "保存中…" else state.quotaLimitLabel,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = colors.primary,
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = state.quotaUsageLabel,
+                fontSize = 12.sp,
+                color = colors.onSurfaceVariant,
+            )
+            if (state.quotaBlocked) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = state.quotaDetail.ifBlank { "该应用今日额度已用完" },
+                    fontSize = 11.sp,
+                    color = colors.error,
+                )
+            }
+            if (state.systemProtected) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "系统关键应用不会被拦截，这里设置的限额只作记录。",
+                    fontSize = 11.sp,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            LimitChipRow(
+                options = listOf(0, 15, 30, 60),
+                currentLimit = state.quotaLimitMinutes,
+                enabled = !state.quotaSaving,
+                onSelect = onSave,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            LimitChipRow(
+                options = listOf(90, 120, 180, 240),
+                currentLimit = state.quotaLimitMinutes,
+                enabled = !state.quotaSaving,
+                onSelect = onSave,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                FilterChip(
+                    selected = false,
+                    onClick = { showCustomDialog = true },
+                    enabled = !state.quotaSaving,
+                    label = { Text("自定义…", fontSize = 11.sp) },
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "选择「不限」= 清除限额",
+                    fontSize = 10.sp,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "超过后该应用今天会被拦截（与总时长无关）；单应用限额优先于白名单。",
+                fontSize = 11.sp,
+                color = colors.onSurfaceVariant,
+                lineHeight = 16.sp,
+            )
+        }
+    }
+
+    if (showCustomDialog) {
+        CustomLimitDialog(
+            initialLimit = state.quotaLimitMinutes,
+            onDismiss = { showCustomDialog = false },
+            onConfirm = { minutes ->
+                showCustomDialog = false
+                onSave(minutes)
+            },
+        )
+    }
+}
+
+@Composable
+private fun LimitChipRow(
+    options: List<Int>,
+    currentLimit: Int?,
+    enabled: Boolean,
+    onSelect: (Int) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        options.forEach { minutes ->
+            val selected = if (minutes <= 0) currentLimit == null else currentLimit == minutes
+            FilterChip(
+                selected = selected,
+                onClick = { onSelect(minutes) },
+                enabled = enabled,
+                label = { Text(if (minutes <= 0) "不限" else "$minutes", fontSize = 11.sp) },
+            )
+        }
+    }
+}
+
+/** 自定义限额对话框：1–1440 整数，非法输入禁用保存并提示 */
+@Composable
+private fun CustomLimitDialog(
+    initialLimit: Int?,
+    onDismiss: () -> Unit,
+    onConfirm: (Int) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    var text by remember { mutableStateOf(initialLimit?.toString() ?: "") }
+    val parsed = text.trim().toIntOrNull()
+    val valid = parsed != null && parsed in 1..1440
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("自定义每日限额", fontSize = 16.sp) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { input -> text = input.filter { it.isDigit() }.take(4) },
+                    label = { Text("分钟（1-1440）", fontSize = 12.sp) },
+                    singleLine = true,
+                    isError = text.isNotBlank() && !valid,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (text.isNotBlank() && !valid) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "请输入 1-1440 之间的整数",
+                        fontSize = 11.sp,
+                        color = colors.error,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { parsed?.let(onConfirm) },
+                enabled = valid,
+            ) {
+                Text("保存", fontSize = 13.sp)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消", fontSize = 13.sp)
+            }
+        },
+    )
 }
 
 @Composable
@@ -432,6 +638,35 @@ private fun SessionsCard(sessions: List<SessionSlice>) {
 }
 
 // ---------------------------------------------------------------- 通用小件
+
+/** 白名单添加结果提示（成功 / 达到每日上限被拒），可关闭 */
+@Composable
+private fun DetailNoticeCard(text: String, isError: Boolean, onDismiss: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isError) colors.errorContainer else colors.primary.copy(alpha = 0.10f),
+        ),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 14.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = text,
+                fontSize = 11.sp,
+                color = if (isError) colors.onErrorContainer else colors.onSurface,
+                lineHeight = 16.sp,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onDismiss) {
+                Text("知道了", fontSize = 11.sp)
+            }
+        }
+    }
+}
 
 @Composable
 private fun DetailInfoCard(text: String) {

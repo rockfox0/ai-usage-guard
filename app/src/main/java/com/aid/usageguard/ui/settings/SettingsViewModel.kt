@@ -7,7 +7,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aid.usageguard.data.Access
 import com.aid.usageguard.data.Container
+import com.aid.usageguard.data.repo.WhitelistRepository
 import com.aid.usageguard.data.settings.AppSettings
+import com.aid.usageguard.domain.quota.FocusWindow
+import com.aid.usageguard.restriction.RestrictionMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -31,6 +34,12 @@ class SettingsViewModel(
     val permissionState = MutableStateFlow(PermissionState())
     val message = MutableStateFlow<String?>(null)
 
+    /** 今日总使用分钟（「每日使用额度」卡展示已用/剩余；null = 尚未读取） */
+    val quotaUsedMinutes = MutableStateFlow<Long?>(null)
+
+    /** 白名单每日添加额度（今日已添加 / 剩余；null = 尚未读取） */
+    val whitelistQuota = MutableStateFlow<WhitelistRepository.Quota?>(null)
+
     fun refreshPermissions() {
         val context = getApplication<Application>()
         permissionState.value = PermissionState(
@@ -38,6 +47,42 @@ class SettingsViewModel(
             accessibilityOn = accessSafe(context) { Access.accessibilityGranted(context) },
             notificationsEnabled = accessSafe(context) { notificationsEnabled(context) },
         )
+    }
+
+    /** 读取今日总使用分钟（额度卡用） */
+    fun refreshQuotaUsage() {
+        viewModelScope.launch {
+            val snapshot = runCatching { Container.quota.todayUsage() }.getOrNull()
+            quotaUsedMinutes.value = snapshot?.totalMinutes
+        }
+    }
+
+    /** 读取白名单添加额度（今日已添加 / 还可添加） */
+    fun refreshWhitelistQuota() {
+        viewModelScope.launch {
+            whitelistQuota.value = runCatching { Container.whitelist.quota() }.getOrNull()
+        }
+    }
+
+    /** 白名单每日添加上限：1/2/3 个，0 = 不限 */
+    fun setWhitelistDailyLimit(limit: Int) = viewModelScope.launch {
+        settingsRepo.setWhitelistDailyLimit(limit)
+        refreshWhitelistQuota()
+        message.value = if (limit <= 0) {
+            "白名单每天添加数量不限"
+        } else {
+            "白名单每天最多添加 $limit 个应用"
+        }
+    }
+
+    /** 专注时段：时段内只能用白名单应用（与额度无关） */
+    fun setFocusWindow(enabled: Boolean, startHour: Int, endHour: Int) = viewModelScope.launch {
+        settingsRepo.setFocusWindow(enabled, startHour, endHour)
+        message.value = if (enabled) {
+            "专注时段已开启：${FocusWindow.label(startHour, endHour)} 只能用白名单应用"
+        } else {
+            "专注时段已关闭"
+        }
     }
 
     fun saveAiConfig(baseUrl: String, apiKey: String, model: String, format: String) {
@@ -79,6 +124,22 @@ class SettingsViewModel(
 
     fun setRestrictByDefault(enabled: Boolean) = viewModelScope.launch {
         settingsRepo.setRestrictByDefault(enabled)
+    }
+
+    /** v1.8.1：限制模式三选一 */
+    fun setRestrictionMode(mode: RestrictionMode) = viewModelScope.launch {
+        settingsRepo.setRestrictionMode(mode)
+        message.value = "已切换为「${mode.label}」：${mode.description}"
+    }
+
+    /** v1.8：超出每日额度后是否拦截非白名单应用 */
+    fun setDailyBudgetEnforced(enabled: Boolean) = viewModelScope.launch {
+        settingsRepo.setDailyBudgetEnforced(enabled)
+        message.value = if (enabled) {
+            "已开启：超出每日额度后拦截非白名单应用"
+        } else {
+            "已关闭：全局额度只做提醒，不拦截应用"
+        }
     }
 
     fun setNotifyDailyReminder(enabled: Boolean) = viewModelScope.launch { settingsRepo.setNotifyDailyReminder(enabled) }

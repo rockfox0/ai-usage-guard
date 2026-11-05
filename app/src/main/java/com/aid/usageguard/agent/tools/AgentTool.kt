@@ -9,6 +9,19 @@ import java.util.Date
 import java.util.Locale
 
 /**
+ * 工具副作用类型（v1.7 方案 6.1 权限矩阵）。
+ *
+ * - [QUERY]：只读查询，所有任务域（对话/报告/后台/洞察）都可见；
+ * - [PROPOSE]：只生成「待确认操作草案」，不立即改状态（仅对话域可见）；
+ * - [CONTROL]：会立即产生本地副作用的操作，例如生成本地报告、发测试通知（仅对话域可见）。
+ */
+enum class ToolKind {
+    QUERY,
+    PROPOSE,
+    CONTROL,
+}
+
+/**
  * 一个本地工具。
  *
  * 安全约束：
@@ -26,6 +39,10 @@ interface AgentTool {
 
     /** JSON Schema（`type=object`），用于向模型声明参数并做本地校验 */
     val parameters: JSONObject
+
+    /** 副作用类型：默认只读；会改状态的工具必须显式标成 [ToolKind.PROPOSE] / [ToolKind.CONTROL] */
+    val kind: ToolKind
+        get() = ToolKind.QUERY
 
     /**
      * 执行工具并返回结构化结果。
@@ -54,10 +71,20 @@ object JsonSchema {
         put("additionalProperties", false)
     }
 
-    fun string(description: String, enum: List<String>? = null): JSONObject = JSONObject().apply {
+    /**
+     * 字符串参数。
+     * @param format 业务格式约束：`date`（yyyy-MM-dd）或 `app_ref`（包名/应用名），
+     *               由 ToolExecutor 独立校验，避免只靠提示词。
+     */
+    fun string(
+        description: String,
+        enum: List<String>? = null,
+        format: String? = null,
+    ): JSONObject = JSONObject().apply {
         put("type", "string")
         put("description", description)
         if (!enum.isNullOrEmpty()) put("enum", JSONArray(enum))
+        if (!format.isNullOrBlank()) put("format", format)
     }
 
     fun integer(

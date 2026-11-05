@@ -4,11 +4,15 @@ import android.content.Context
 import com.aid.usageguard.agent.contract.AgentRuntime
 import com.aid.usageguard.agent.contract.StubAgentRuntime
 import com.aid.usageguard.data.db.AppDatabase
+import com.aid.usageguard.data.repo.ActionDraftRepository
 import com.aid.usageguard.data.repo.BehaviorRepository
+import com.aid.usageguard.data.repo.QuotaRepository
+import com.aid.usageguard.data.repo.WhitelistRepository
 import com.aid.usageguard.data.repo.ReportRepository
 import com.aid.usageguard.data.repo.ScoreRepository
 import com.aid.usageguard.data.repo.UsageRepository
 import com.aid.usageguard.data.settings.SettingsRepository
+import com.aid.usageguard.domain.action.ActionExecutor
 import com.aid.usageguard.domain.behavior.BehaviorAnalyzerContract
 import com.aid.usageguard.restriction.AccessibilityRestrictionController
 import com.aid.usageguard.restriction.AppRestrictionController
@@ -35,7 +39,23 @@ object Container {
         private set
     lateinit var score: ScoreRepository
         private set
+
+    /** v1.8：全局每日额度 + 单应用每日限额 */
+    lateinit var quota: QuotaRepository
+        private set
+
+    /** v1.8.2：白名单增删（含每日添加上限） */
+    lateinit var whitelist: WhitelistRepository
+        private set
     lateinit var restrictions: AppRestrictionController
+        private set
+
+    /** v1.7：AI 提议的待确认操作（草案） */
+    lateinit var actionDrafts: ActionDraftRepository
+        private set
+
+    /** v1.7：确认后由本地执行器执行（参数来自草案，不重新生成） */
+    lateinit var actionExecutor: ActionExecutor
         private set
 
     /** Agent 实现由 agent.runtime 包在 App.onCreate 里注入 */
@@ -59,7 +79,11 @@ object Container {
             behavior = BehaviorRepository(db)
             reports = ReportRepository(db, usage, behavior, settings) { agentRuntime }
             score = ScoreRepository(db, usage, settings)
+            quota = QuotaRepository(db, usage, settings)
+            whitelist = WhitelistRepository(settings)
             restrictions = AccessibilityRestrictionController(db)
+            actionDrafts = ActionDraftRepository(db)
+            actionExecutor = ActionExecutor(settings, restrictions, usage, quota, whitelist)
             initialized = true
         }
     }

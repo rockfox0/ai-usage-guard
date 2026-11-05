@@ -62,6 +62,8 @@ object UsageScoreEngine {
             launchCount = snapshot.launchCount,
             slots = slots,
             topApps = snapshot.topApps,
+            dataStatus = snapshot.dataStatus,
+            scoreAvailable = snapshot.dataStatus == "VALID" || snapshot.dataStatus == "PARTIAL",
         )
     }
 
