@@ -40,7 +40,8 @@
 
 - 主动分析独立开关 `notify_proactive`（ProactiveAgent / 通知 / 工具 / 草案卡全链路）
 - 设置页「AI 洞察」卡（开关 + 最近 5 条 + 空态）与「模型路由」卡（`ai_planner_model` 可视化配置）
-- `SettingsRepository.setAiPlannerModel` 补齐；125 单测通过；APK v34 已装 Pixel
+- `SettingsRepository.setAiPlannerModel` 补齐；**126 单测通过**（含脚本化端到端管线测试）；APK v34 已装 Pixel
+- 最终验收文档：`docs/AI_UPGRADE_ACCEPTANCE.md`（Case 对照 + 真机记录 + 已知限制）
 
 ## 已知缺口（随阶段补齐）
 

@@ -18,7 +18,14 @@
 | 白名单每日上限 | 默认每天最多添加 1 个应用（可调 1/2/3/不限），防止随手放行；移出不计次 |
 | 系统豁免 | 电话/短信/设置/桌面/输入法/所有系统应用永久豁免 |
 | 行为分析 | 6 类检测：使用增加、长会话、深夜使用、频繁启动、超总目标、连续多日增长 |
-| AI Agent | **34 个工具**：查数据/30 天趋势/评分/额度/白名单/专注时段、**改设置**（目标/勿扰/通知/主题/限制模式/实时提示/个性化/每日额度开关/单应用限额/专注时段/白名单上限）、限制/放行应用、刷新数据、生成报告 |
+| AI Agent | **48 个工具 / 12 个能力**：动态能力发现（按需加载，不再全量下发）、任务规划（Direct/Analysis/Goal + 结果评估补轮）、长期记忆（偏好/目标/反馈/决策）、结构化回复、自定义监控、主动洞察、功能提案 |
+| 动态能力发现 | 9→12 个能力目录覆盖全部工具；简单问题首轮只下发 8 个工具（原 36）；执行器有「能力门禁」，未加载能力即使模型硬调也会被拒 |
+| 任务规划 | 复杂/目标型任务先产出 ≤3 步 JSON 计划（含完成条件），按步执行；结果评估发现数据不足会补一轮或明确告知（不补零、不编造） |
+| 长期记忆 | 记住偏好/长期目标/对建议的反馈/做过的决策；用户说「太严格/别提醒」会被识别，后续建议避开同类方案 |
+| 结构化回复 | 统计卡/洞察卡/建议卡/对比/本地 7 天图表/后续操作 chip；JSON 解析失败自动回退 Markdown，数字必须来自本地工具 |
+| 自定义监控 | 自然语言建规则（如「工作日微信超过 3 小时提醒我」）；本地引擎每 15 分钟判断，不调用模型 |
+| 主动洞察 | 本地先筛变化候选（周环比/时间转移/超目标），每天最多 1 条 AI 洞察；可独立关闭 |
+| 模型路由 | 可配置 `ai_planner_model`：规划/复杂分析/报告用强模型，日常问答保持默认模型 |
 | AI 个性化 | 称呼、语气（温和/直接/严厉）、关注点（睡眠/学习/娱乐/效率）、自定义要求，注入系统提示词 |
 | AI 交互 | 流式输出（逐字 + 工具状态）、可随时停止、页面上下文快照（正在分析：某应用 · 最近 N 天）、**写操作一律先出「待确认草案」**，用户确认后才执行 |
 | 守护保活 | 前台常驻服务 + 无障碍自恢复（一次性 adb 授权 `WRITE_SECURE_SETTINGS`，被 OEM 关闭后约 20 秒自动写回）+ 15 分钟看门狗 + 开机自启 + 电池/自启动引导；无法恢复时发通知提醒 |
@@ -62,23 +69,47 @@
 - AGP 8.13.2 / Gradle 8.13 / JDK 17 / compileSdk 36 / targetSdk 35 / minSdk 26
 - MVVM + Repository；`data/Container.kt` 极简依赖容器（无 DI 框架）
 
+## AI Agent（v1.9）
+
+```
+用户目标
+  → 模式判定（Direct / Analysis / Goal，本地零 token）
+  → 能力路由（关键词+页面上下文）+ 元工具 discover/load
+  → [复杂分析] 并行只读专家子 Agent（本地快照，无工具）
+  → [复杂任务] 任务规划（JSON 计划 + 完成条件）→ 按步执行
+  → 工具循环（预算：6 请求 / 12 工具 / 180 秒）
+  → 结果评估（数据不足→补一轮或明确说明）
+  → 结构化回复 / Markdown 回退
+  → 长期记忆（反馈/目标/决策）影响下一次建议
+```
+
+- 验收：Case 1–8 全部通过，见 [docs/AGENT_BENCHMARK.md](docs/AGENT_BENCHMARK.md)、[docs/AI_UPGRADE_ACCEPTANCE.md](docs/AI_UPGRADE_ACCEPTANCE.md)
+- 一键跑 Benchmark：`./scripts/agent_bench.sh`（纯 JVM，无需设备/Key）
+- 真机调试（仅 debug 构建）：
+  ```bash
+  adb shell am broadcast -n com.aid.usageguard/.debug.DebugReceiver -a com.aid.usageguard.DEBUG_RUN_MONITORS
+  adb shell am broadcast -n com.aid.usageguard/.debug.DebugReceiver -a com.aid.usageguard.DEBUG_RUN_PROACTIVE
+  ```
+
 ## 架构
 
 ```
 app/src/main/java/com/aid/usageguard/
 ├── data/            # Room 实体/DAO、UsageEventSource、UsageIngester、Repository、设置、容器
 ├── domain/          # 模型、行为分析引擎、评分引擎（UsageScoreEngine）、本地报告生成
-├── agent/           # LLM 客户端（OpenAI / Anthropic）、26 个工具、ToolExecutor、AgentLoop、对话记忆
+├── agent/           # LLM 客户端/路由、48 个工具、能力目录、规划器、上下文、记忆、结构化回复、子 Agent
 ├── service/         # GuardService（无障碍 + 拦截浮层 + 实时提示）
 ├── restriction/     # 限制策略、RuleValidator（系统应用保护）、TempAllowStore
 ├── work/            # 4 个 Worker + 排期
 ├── notify/          # 通知渠道与文案
+├── domain/          # 另有 monitor/（自定义监控规则与引擎）、insight/（主动候选检测）
 └── ui/              # Compose 页面：首页 / 应用 / AI 助手 / 报告 / 设置 + 主题、Markdown-lite
 ```
 
 关键设计：
 
-- **AI 不能执行任意代码**：模型只能调用白名单内的 26 个本地工具，工具内部再校验参数与系统保护应用。
+- **AI 不能执行任意代码**：模型只能调用白名单内的 48 个本地工具，工具内部再校验参数与系统保护应用；
+  能力发现阶段还有执行器门禁（未加载能力的工具不可执行）。
 - **评分是本地确定性算法**（不依赖 AI），AI 只负责解读与建议，离线可用。
 - **系统应用豁免**：默认限制只作用于用户安装的第三方应用，避免 OEM ROM 的系统组件被拦。
 
@@ -164,6 +195,7 @@ adb shell settings put secure accessibility_enabled 1
 | v1.9 Phase 5 | 自定义监控：自然语言建规则（create/list/remove_monitor）、DB v6 规则+触发历史、15 分钟本地引擎（不调模型）、通知渠道、设置页「我的监控」卡（94 单测） |
 | v1.9 Phase 6 | 主动 Agent + 功能提案：本地候选检测（周环比/时间转移/超目标）、每天最多 1 条洞察（LLM 分析、失败退化为本地事实）、DB v7、FeatureProposal 结构化提案与工具（111 单测） |
 | v1.9 Phase 7 | 模型路由 + 只读专家子 Agent：`ai_planner_model`（规划/子 Agent/报告用强模型）、复杂分析并行 2 个专家（本地快照、无工具、无副作用）、失败静默降级（124 单测） |
+| v1.9 收尾 | 主动分析独立开关、设置页「AI 洞察」卡与「模型路由」配置、调试触发入口（126 单测） |
 | v1.9 Benchmark | Case 1–8 验收：模糊表达/多目标/上下文/缺能力/自定义监控/长期反馈/主动分析/功能建议，全链路真实代码断言，8/8 通过（125 单测） |
 
 详细实现说明见 [IMPLEMENTATION.md](IMPLEMENTATION.md)，各版本真机验收报告见 [docs/reports/](docs/reports/)，
@@ -175,6 +207,7 @@ adb shell settings put secure accessibility_enabled 1
 |---|---|
 | `ug_setup_device.sh` | 安装 + 授予使用情况/通知/无障碍 + 注入 AI 配置（`UG_API_KEY`、`UG_BASE_URL` 通过环境变量传入） |
 | `ug_ui.py` | adb UI 自动化：dump / tap / 文本输入 / 截图（`UG_SERIAL` 指定设备） |
+| `agent_bench.sh` | 跑 Agent Benchmark（Case 1–8） |
 | `ug_chat.py` | 在 AI 助手页发送一条消息并等待回复（真机联调） |
 | `ug_read_prefs.py` | 读取并解码 DataStore 设置（`run-as`，无需 root） |
 | `ug_set_prefs.py` | 直接读写任意 DataStore 设置（`set key=value` / `del key` / `list`，自动重启无障碍） |
