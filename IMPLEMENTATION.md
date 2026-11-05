@@ -456,3 +456,28 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
   **总计 111 个单测全部通过**；能力 12 个 / 工具 48 个；APK versionCode 30，MD5 `c48f75c39d73eaa021e39933143e4c52`。
 - 已知缺口：洞察列表暂无独立 UI（先通过通知 + 助手工具查看）；主动分析复用「异常提醒」开关（未新增独立偏好项）。
 - 真机：设备仍未连接，Phase 4/5/6 真机回归待设备恢复。
+
+---
+
+## 二十五、v1.9 Phase 7：模型路由 + 只读专家子 Agent
+
+### 模型路由（ModelRouter）
+- 新增设置项 `ai_planner_model`（`AppSettings.aiPlannerModel`，空 = 与 `aiModel` 相同）：
+  - 直答/简单工具调用：`aiModel`（快、便宜）；
+  - 规划（TaskPlanner）、只读子 Agent、日报/周报：`aiPlannerModel`。
+- `LlmClientFactory.create(settings, modelOverride)` 支持按请求覆盖模型；
+  `ModelRouter.modelFor(route, settings)` 统一决策，日志/界面可用 `describe()`。
+
+### 只读专家子 Agent（SubAgentManager）
+- `agent/multi/SubAgentPolicy`（纯函数）：仅 `ANALYSIS` + 剩余模型请求 ≥5 且问题复杂（30 天/一个月/全面/多维度/习惯/趋势…）时启用；
+  简单问题、目标型任务、预算紧张一律不启用（避免"每个问题都开多 Agent"）。
+- `agent/multi/SubAgentManager`：两个并行专家（使用分析师 / 行为分析师），
+  - 本地先整理紧凑快照（7/30 天日均、Top 应用、近期行为事件），再各 1 次模型请求（30s 超时、无工具、无副作用）；
+  - 结果作为「专家分析摘要」注入主 Agent 上下文，由主 Agent 统一给最终结论；
+  - 失败/超时/未配置静默跳过；预算按 2 次请求预扣，跑完跳过规划把额度留给主循环。
+- `SubAgentSnapshots`（纯函数）：快照格式化，单测覆盖。
+
+### 测试与产物
+- 新增 `ModelRouterTest`(4)、`SubAgentPolicyTest`(5)、`SubAgentSnapshotsTest`(4)；
+  **总计 124 个单测全部通过**；APK versionCode 31，MD5 `2ce17a06b51e662aecc6140ac4a1180c`。
+- 真机：设备仍未连接，Phase 4/5/6/7 真机回归待设备恢复。

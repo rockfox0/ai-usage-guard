@@ -27,6 +27,8 @@ data class AppSettings(
     val aiBaseUrl: String = DEFAULT_BASE_URL,
     val aiApiKey: String = "",
     val aiModel: String = DEFAULT_MODEL,
+    /** 规划/复杂分析/子 Agent 用的模型；空 = 与 aiModel 相同（v1.9 Phase 7 模型路由） */
+    val aiPlannerModel: String = "",
     val aiFormat: String = FORMAT_OPENAI,
     val notifyDailyReminder: Boolean = true,
     val notifyGoalExceeded: Boolean = true,
@@ -116,6 +118,7 @@ class SettingsRepository(private val context: Context) {
         val AI_BASE_URL = stringPreferencesKey("ai_base_url")
         val AI_API_KEY = stringPreferencesKey("ai_api_key")
         val AI_MODEL = stringPreferencesKey("ai_model")
+        val AI_PLANNER_MODEL = stringPreferencesKey("ai_planner_model")
         val AI_FORMAT = stringPreferencesKey("ai_format")
         val NOTIFY_DAILY_REMINDER = booleanPreferencesKey("notify_daily_reminder")
         val NOTIFY_GOAL_EXCEEDED = booleanPreferencesKey("notify_goal_exceeded")
@@ -155,6 +158,7 @@ class SettingsRepository(private val context: Context) {
             aiBaseUrl = prefs[Keys.AI_BASE_URL] ?: defaults.aiBaseUrl,
             aiApiKey = prefs[Keys.AI_API_KEY] ?: defaults.aiApiKey,
             aiModel = prefs[Keys.AI_MODEL] ?: defaults.aiModel,
+            aiPlannerModel = prefs[Keys.AI_PLANNER_MODEL] ?: defaults.aiPlannerModel,
             aiFormat = prefs[Keys.AI_FORMAT] ?: defaults.aiFormat,
             notifyDailyReminder = prefs[Keys.NOTIFY_DAILY_REMINDER] ?: defaults.notifyDailyReminder,
             notifyGoalExceeded = prefs[Keys.NOTIFY_GOAL_EXCEEDED] ?: defaults.notifyGoalExceeded,

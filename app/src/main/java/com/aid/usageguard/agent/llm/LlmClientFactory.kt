@@ -8,12 +8,16 @@ import com.aid.usageguard.data.settings.AppSettings
  */
 object LlmClientFactory {
 
-    fun create(settings: AppSettings): LlmClient? {
+    /**
+     * @param modelOverride 覆盖模型名（v1.9 Phase 7 模型路由）；null 用设置里的默认模型
+     */
+    fun create(settings: AppSettings, modelOverride: String? = null): LlmClient? {
         val apiKey = settings.aiApiKey.trim()
         if (apiKey.isEmpty()) return null
         val base = normalizeApiBase(settings.aiBaseUrl)
         if (base.isEmpty()) return null
-        val model = settings.aiModel.trim().ifBlank { AppSettings.DEFAULT_MODEL }
+        val model = modelOverride?.trim()?.takeIf { it.isNotEmpty() }
+            ?: settings.aiModel.trim().ifBlank { AppSettings.DEFAULT_MODEL }
 
         return when (settings.aiFormat.trim().lowercase()) {
             AppSettings.FORMAT_ANTHROPIC -> AnthropicClient(

@@ -13,12 +13,15 @@ import com.aid.usageguard.agent.llm.LlmClientFactory
 import com.aid.usageguard.agent.llm.LlmException
 import com.aid.usageguard.agent.llm.LlmMessage
 import com.aid.usageguard.agent.llm.LlmResponse
+import com.aid.usageguard.agent.llm.ModelRouter
 import com.aid.usageguard.agent.llm.LlmToolSpec
 import com.aid.usageguard.agent.llm.LlmStreamUnavailableException
 import com.aid.usageguard.agent.llm.normalizeApiBase
 import com.aid.usageguard.agent.context.ContextEngine
 import com.aid.usageguard.agent.memory.AgentMemory
 import com.aid.usageguard.agent.memory.MemoryEngine
+import com.aid.usageguard.agent.multi.SubAgentManager
+import com.aid.usageguard.agent.multi.SubAgentPolicy
 import com.aid.usageguard.agent.plan.EvaluationVerdict
 import com.aid.usageguard.agent.plan.ResultEvaluator
 import com.aid.usageguard.agent.plan.TaskMode
@@ -113,6 +116,9 @@ class AgentLoop(
 
     /** 上下文压缩（更早对话摘要） */
     private val contextEngine: ContextEngine by lazy { ContextEngine(memory) }
+
+    /** 只读专家子 Agent（v1.9 Phase 7） */
+    private val subAgents: SubAgentManager by lazy { SubAgentManager(usage, behavior, settings) }
 
     /** 当前任务 id（控制类工具把待确认草案归属到具体任务；任务结束恢复） */
     private val currentTaskId = AtomicReference("")
@@ -391,7 +397,12 @@ class AgentLoop(
         val usedTools = ArrayList<String>()
 
         val prefs = runCatching { settings.current() }.getOrDefault(AppSettings.DEFAULT)
-        val client: LlmClient? = LlmClientFactory.create(prefs)
+        val route = if (request.scope == TaskScope.REPORT) {
+            ModelRouter.Route.REPORT
+        } else {
+            ModelRouter.Route.CHAT_DIRECT
+        }
+        val client: LlmClient? = LlmClientFactory.create(prefs, ModelRouter.modelFor(route, prefs))
 
         try {
             val messages = ArrayList<LlmMessage>()
@@ -456,16 +467,50 @@ class AgentLoop(
             }
             var plan: TaskPlan? = null
             var replanned = false
+            // v1.9 Phase 7：复杂分析先并行跑 2 个只读专家子 Agent（不产生副作用），再进入主循环。
+            // 子 Agent 各占 1 次模型请求；跑完后跳过规划，把预算留给主循环。
+            var fanOutDone = false
+            if (request.scope == TaskScope.CHAT &&
+                SubAgentPolicy.shouldFanOut(mode, budget.remainingModelRequests, request.prompt)
+            ) {
+                val firstStop = budget.tryConsumeModelRequest()
+                val secondStop = if (firstStop == null) budget.tryConsumeModelRequest() else firstStop
+                if (firstStop == null && secondStop == null) {
+                    val findings = runCatching { subAgents.run(request.prompt) }.getOrDefault(emptyList())
+                    if (findings.isNotEmpty()) {
+                        fanOutDone = true
+                        messages.add(
+                            LlmMessage.user(
+                                buildString {
+                                    append("【专家分析摘要（本地数据生成，仅供参考；最终数字仍要调用工具核对）】\n")
+                                    findings.forEach { finding ->
+                                        append("· ").append(finding.agent).append("：").append(finding.text).append('\n')
+                                    }
+                                    append("请结合这些要点与工具查询结果，给出统一、简洁的中文结论。")
+                                },
+                            ),
+                        )
+                        Log.i(TAG, "sub-agents done: ${findings.map { it.agent }}")
+                    }
+                } else {
+                    budgetStop = firstStop ?: secondStop
+                }
+            }
+
             // 规划要占 1 次模型请求；剩余不足 3 次时直接走直答，避免"规划完就没额度执行"
             if (request.scope == TaskScope.CHAT && mode != TaskMode.DIRECT &&
-                budget.remainingModelRequests >= 3
+                !fanOutDone && budget.remainingModelRequests >= 3
             ) {
                 val planStop = budget.tryConsumeModelRequest()
                 if (planStop != null) {
                     budgetStop = planStop
                 } else {
                     val parsed = runCatching {
-                        val plannerResp = llm.complete(
+                        val plannerClient = LlmClientFactory.create(
+                            prefs,
+                            ModelRouter.modelFor(ModelRouter.Route.PLANNER, prefs),
+                        ) ?: llm
+                        val plannerResp = plannerClient.complete(
                             system = TaskPlanner.systemPrompt(),
                             messages = listOf(
                                 LlmMessage.user(
