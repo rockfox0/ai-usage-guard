@@ -482,6 +482,24 @@ class AgentLoop(
                             .forEach { loadedCapabilities.add(it) }
                         visibleSpecs = computeVisibleSpecs()
                         messages.add(LlmMessage.user(TaskPlanner.directive(parsed)))
+                        // 计划落库（kind=plan）：便于真机观测/后续 UI 展示执行步骤
+                        runCatching {
+                            memoryEngine?.recordPlan(
+                                taskId = "${request.sessionId}@$startedAt",
+                                planJson = org.json.JSONObject()
+                                    .put("goal", parsed.goal)
+                                    .put("mode", parsed.mode.name)
+                                    .put("steps", org.json.JSONArray().apply {
+                                        parsed.steps.forEach { step ->
+                                            put(org.json.JSONObject()
+                                                .put("description", step.description)
+                                                .put("capabilities", org.json.JSONArray(step.capabilities)))
+                                        }
+                                    })
+                                    .put("criteria", org.json.JSONArray(parsed.completionCriteria))
+                                    .toString(),
+                            )
+                        }
                         Log.i(
                             TAG,
                             "planned mode=$mode steps=${parsed.steps.size} caps=${parsed.steps.flatMap { it.capabilities }.distinct()} tools=${visibleSpecs.size}",

@@ -359,5 +359,11 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
 
 ### 测试
 - 新增 `FeedbackDetectorTest`(4)、`MemoryPromptTest`(3)、`ConversationCompressorTest`(4)
-- **总计 77 个单测全部通过**；APK 已构建（versionCode 25，MD5 `fb4c9dbc156032ce0a59bd1b03e66ea2`）
-- 真机安装/回归：设备被用户占用中，未安装；下一轮设备空闲时补（验证：英文反馈写入 `agent_feedback`、记忆注入日志、对话摘要日志）
+- **总计 77 个单测全部通过**；APK 已构建并安装（versionCode 26，MD5 `38c5b0df7e1357c6d6b603fe90a36e41`）
+- 真机验证（vivo，versionCode 26）：
+  - 反馈识别：发送 "too strict, do not remind me" → `agent_feedback` 写入 `REJECT`（`reason` 为原话）✅
+  - 记忆写入：发送 "remember I prefer gentle reminders" → 模型调用 `save_memory` + `record_feedback`，
+    写入 `agent_memory(kind=profile, memKey=reminder_style)` 与 `PREFER` 反馈；回答明确引用偏好 ✅
+  - 记忆影响行为：后续复杂分析回答出现「按你的偏好，我就不再劝你设限额了」✅
+  - 计划落库（本版新增 `kind=plan`）：`agent_memory(plan)` 记录 mode=ANALYSIS、3 步、能力与 4 条完成条件 ✅
+  - 测试数据已清理（删除测试对话/假反馈/测试记忆，保留用户真实历史 49 条）

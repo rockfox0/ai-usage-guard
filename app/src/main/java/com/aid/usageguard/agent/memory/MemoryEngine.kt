@@ -54,6 +54,11 @@ class MemoryEngine(private val repo: MemoryRepository) {
         }
     }
 
+    /** 记录一次任务计划（kind=plan），用于真机验证与后续 UI 展示步骤 */
+    suspend fun recordPlan(taskId: String, planJson: String) {
+        runCatching { repo.putMemory("plan", taskId.ifBlank { "latest" }, planJson) }
+    }
+
     suspend fun saveGoal(goal: String, targetPeriod: String = ""): AgentGoalEntity =
         repo.saveGoal(goal, targetPeriod)
 

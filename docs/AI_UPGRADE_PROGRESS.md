@@ -6,13 +6,20 @@
 |---|---|---|---|
 | 0 | 架构审计 + 差距矩阵 + 计划 | ✅ 完成 | `docs/AI_ARCHITECTURE_AUDIT.md`；commit `8f538c0` |
 | 1 | 动态能力发现（9 能力/34 工具、discover/load 元工具、执行器门禁） | ✅ 完成 | `agent/capability/*`、`agent/tools/CapabilityTools.kt`；48 单测；真机 `task tools: caps=[usage_analysis] tools=8/36`；commit `3568a4c` |
-| 2 | 动态任务规划 + 结果评估（Direct/Analysis/Goal、TaskPlan、NEED_MORE 补轮、数据不足说明） | ✅ 代码/单测完成，真机回归待补 | `agent/plan/*`、`AgentLoop` 集成；66 单测通过；v23 已安装（设备锁屏未跑 Case 2/4） |
-| 3 | 上下文工程 + 长期记忆（对话摘要压缩、DB v5 画像/目标/反馈/决策、反馈识别、记忆工具） | ✅ 代码/单测完成，真机待补 | `agent/context/*`、`agent/memory/*`、`data/repo/MemoryRepository.kt`；77 单测；APK v25 未安装（设备占用） |
+| 2 | 动态任务规划 + 结果评估（Direct/Analysis/Goal、TaskPlan、NEED_MORE 补轮、数据不足说明） | ✅ 完成（真机已验证） | `agent/plan/*`、`AgentLoop` 集成；66 单测；真机：`agent_memory(plan)` 记录 mode=ANALYSIS / 3 步 / 能力 / 4 条完成条件；执行工具 `get_usage_trend`+`get_usage_score`；回答明确「30 天只有 9 天有记录」 |
+| 3 | 上下文工程 + 长期记忆（对话摘要压缩、DB v5 画像/目标/反馈/决策、反馈识别、记忆工具） | ✅ 完成（真机已验证） | `agent/context/*`、`agent/memory/*`、`data/repo/MemoryRepository.kt`；77 单测；真机：REJECT/PREFER 写入 `agent_feedback`、`save_memory` 写 `agent_memory(profile)`、回答引用偏好、计划落库 |
 | 4 | 结构化响应（AgentResponse + Compose 渲染） | ⏳ 未开始 | — |
 | 5 | 自定义监控（MonitorDefinition + 规则引擎） | ⏳ 未开始 | — |
 | 6 | 主动 Agent + Feature Advisor | ⏳ 未开始 | — |
 | 7 | 多 Agent + 模型路由 | ⏳ 未开始 | — |
 | 贯穿 | Agent Benchmark（Case 1–8） | ⏳ 未开始 | — |
+
+## Phase 2/3 真机验证（v26）
+
+- 规划：`agent_memory(kind=plan)` → mode=ANALYSIS，3 步（30 天口径/排行趋势/评分健康度），4 条完成条件；执行只调用 `get_usage_trend`、`get_usage_score`
+- 数据不足：回答明确「30 天里只有 9 天有记录，21 天没有数据」
+- 记忆：`too strict, do not remind me` → REJECT；`remember I prefer gentle reminders` → `save_memory` 写 profile，后续回答引用偏好（「按你的偏好，我就不再劝你设限额了」）
+- 测试数据已清理，保留用户真实历史 49 条
 
 ## Phase 2 回归记录（真机）
 
