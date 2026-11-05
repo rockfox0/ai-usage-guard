@@ -23,8 +23,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AgentMemoryEntity::class,
         AgentGoalEntity::class,
         AgentFeedbackEntity::class,
+        MonitorRuleEntity::class,
+        MonitorTriggerEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -42,6 +44,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun agentMemoryDao(): AgentMemoryDao
     abstract fun agentGoalDao(): AgentGoalDao
     abstract fun agentFeedbackDao(): AgentFeedbackDao
+    abstract fun monitorRuleDao(): MonitorRuleDao
+    abstract fun monitorTriggerDao(): MonitorTriggerDao
 
     companion object {
         /** v1 → v2：新增每日评分表（保留历史使用数据，不破坏性迁移） */
@@ -148,6 +152,41 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v5 → v6：自定义监控规则与触发记录 */
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `monitor_rule` (
+                        `id` TEXT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `packageName` TEXT NOT NULL,
+                        `metric` TEXT NOT NULL,
+                        `operator` TEXT NOT NULL,
+                        `threshold` INTEGER NOT NULL,
+                        `schedule` TEXT NOT NULL,
+                        `action` TEXT NOT NULL,
+                        `timeWindow` TEXT NOT NULL,
+                        `enabled` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )""".trimIndent(),
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `monitor_trigger` (
+                        `id` TEXT NOT NULL,
+                        `ruleId` TEXT NOT NULL,
+                        `ruleName` TEXT NOT NULL,
+                        `date` TEXT NOT NULL,
+                        `value` INTEGER NOT NULL,
+                        `threshold` INTEGER NOT NULL,
+                        `message` TEXT NOT NULL,
+                        `triggeredAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )""".trimIndent(),
+                )
+            }
+        }
+
         @Volatile
         private var instance: AppDatabase? = null
 
@@ -157,7 +196,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "usage_guard.db",
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { instance = it }

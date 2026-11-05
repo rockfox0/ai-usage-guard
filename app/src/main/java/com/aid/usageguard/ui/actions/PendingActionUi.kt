@@ -71,6 +71,8 @@ object PendingActionPresenter {
         "SET_FOCUS_WINDOW" -> "专注时段"
         "SET_WHITELIST_DAILY_LIMIT" -> "白名单每日上限"
         "REFRESH_USAGE_DATA" -> "同步使用数据"
+        "CREATE_MONITOR" -> "自定义监控"
+        "DELETE_MONITOR" -> "删除监控"
         else -> "配置修改"
     }
 
@@ -106,6 +108,8 @@ object PendingActionPresenter {
     fun summarizeParams(type: String, paramsJson: String): String {
         val params = parse(paramsJson)
         return when (type) {
+            "CREATE_MONITOR" -> params.optString("name").ifBlank { "自定义监控规则" }
+            "DELETE_MONITOR" -> params.optString("rule_id").let { if (it.isBlank()) "删除监控规则" else "删除规则 $it" }
             "SET_APP_DAILY_LIMIT" -> {
                 val minutes = params.optInt("minutes", 0)
                 if (minutes <= 0) "清除每日限额" else "每日限额 $minutes 分钟"

@@ -34,6 +34,7 @@ object AgentScheduler {
     const val UNIQUE_ANALYSIS = "behavior_analysis_periodic"
     const val UNIQUE_DAILY_REPORT = "daily_report_periodic"
     const val UNIQUE_WEEKLY_REPORT = "weekly_report_periodic"
+    const val UNIQUE_MONITOR = "custom_monitor_periodic"
 
     /** 使用数据同步周期（分钟） */
     const val SYNC_INTERVAL_MINUTES = 30L
@@ -72,6 +73,13 @@ object AgentScheduler {
         runCatching {
             WorkerSupport.prepare(app)
             val workManager = WorkManager.getInstance(app)
+
+            // 0) 自定义监控检查：15 分钟一次（只读本地数据，不调模型）
+            workManager.enqueueUniquePeriodicWork(
+                UNIQUE_MONITOR,
+                ExistingPeriodicWorkPolicy.KEEP,
+                PeriodicWorkRequestBuilder<MonitorCheckWorker>(15, TimeUnit.MINUTES).build(),
+            )
 
             // 1) 使用数据同步：30 分钟一次
             workManager.enqueueUniquePeriodicWork(

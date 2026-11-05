@@ -29,6 +29,7 @@ import com.aid.usageguard.agent.response.ResponseParser
 import com.aid.usageguard.agent.tools.BehaviorTools
 import com.aid.usageguard.agent.tools.CapabilityTools
 import com.aid.usageguard.agent.tools.MemoryTools
+import com.aid.usageguard.agent.tools.MonitorTools
 import com.aid.usageguard.agent.tools.ControlTools
 import com.aid.usageguard.agent.tools.GuardTools
 import com.aid.usageguard.agent.tools.PendingActionTools
@@ -140,6 +141,7 @@ class AgentLoop(
             addAll(ScoreTools().all)
             addAll(CapabilityTools().all)
             addAll(MemoryTools { memoryEngine }.all)
+            addAll(MonitorTools(usage, eventSource, taskIdProvider = { currentTaskId.get() }).all)
         },
     )
 
@@ -1177,6 +1179,14 @@ class AgentLoop(
                规则：blocks 最多 6 个；数字必须来自工具结果，不能编造；chart 只支持 daily_usage_7d（数据由本地填充）；
                requires_confirmation 只表示"需要用户确认"，不要说已经执行；JSON 块之外仍要有正常中文正文。
 
+            13. 用户说「帮我监控… / …超过 X 就提醒我 / 工作日晚上的规则」时，用 create_monitor 生成监控规则草案：
+               app 可以是应用名/包名，想看全设备合计填「全部应用」；metric=duration（分钟）或 launch（次数）；
+               schedule=daily/weekdays/weekends；threshold 按单位填。规则会先出现在「我的监控」里等用户确认。
+               创建后说明：由本地引擎每 15 分钟检查一次，不需要你一直判断；阈值到了发通知。
+               用户问「我现在有哪些监控 / 触发过几次」用 list_monitors / monitor_history；
+               要删除规则先 list_monitors 拿 id，再 remove_monitor（也是待确认草案）。
+               不要用 set_app_daily_limit / set_focus_window 冒充监控规则——它们拦截应用，监控只通知。
+
             今天的日期是 %TODAY%。
         """.trimIndent()
 
@@ -1220,6 +1230,14 @@ class AgentLoop(
                ]}
                规则：blocks 最多 6 个；数字必须来自工具结果，不能编造；chart 只支持 daily_usage_7d（数据由本地填充）；
                requires_confirmation 只表示"需要用户确认"，不要说已经执行；JSON 块之外仍要有正常中文正文。
+
+            13. 用户说「帮我监控… / …超过 X 就提醒我 / 工作日晚上的规则」时，用 create_monitor 生成监控规则草案：
+               app 可以是应用名/包名，想看全设备合计填「全部应用」；metric=duration（分钟）或 launch（次数）；
+               schedule=daily/weekdays/weekends；threshold 按单位填。规则会先出现在「我的监控」里等用户确认。
+               创建后说明：由本地引擎每 15 分钟检查一次，不需要你一直判断；阈值到了发通知。
+               用户问「我现在有哪些监控 / 触发过几次」用 list_monitors / monitor_history；
+               要删除规则先 list_monitors 拿 id，再 remove_monitor（也是待确认草案）。
+               不要用 set_app_daily_limit / set_focus_window 冒充监控规则——它们拦截应用，监控只通知。
 
             今天的日期是 %TODAY%。
         """.trimIndent()

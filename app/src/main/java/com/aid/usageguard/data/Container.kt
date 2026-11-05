@@ -6,6 +6,7 @@ import com.aid.usageguard.agent.contract.StubAgentRuntime
 import com.aid.usageguard.data.db.AppDatabase
 import com.aid.usageguard.data.repo.ActionDraftRepository
 import com.aid.usageguard.data.repo.MemoryRepository
+import com.aid.usageguard.data.repo.MonitorRepository
 import com.aid.usageguard.data.repo.BehaviorRepository
 import com.aid.usageguard.data.repo.QuotaRepository
 import com.aid.usageguard.data.repo.WhitelistRepository
@@ -55,6 +56,10 @@ object Container {
     lateinit var actionDrafts: ActionDraftRepository
         private set
 
+    /** v1.9 Phase 5：自定义监控规则 */
+    lateinit var monitors: MonitorRepository
+        private set
+
     /** v1.9 Phase 3：长期记忆（画像 / 目标 / 反馈 / 决策） */
     lateinit var memory: MemoryRepository
         private set
@@ -89,7 +94,8 @@ object Container {
             restrictions = AccessibilityRestrictionController(db)
             actionDrafts = ActionDraftRepository(db)
             memory = MemoryRepository(db)
-            actionExecutor = ActionExecutor(settings, restrictions, usage, quota, whitelist)
+            monitors = MonitorRepository(db)
+            actionExecutor = ActionExecutor(settings, restrictions, usage, quota, whitelist, monitors)
             initialized = true
         }
     }

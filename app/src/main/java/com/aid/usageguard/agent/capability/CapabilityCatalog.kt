@@ -141,6 +141,27 @@ object CapabilityCatalog {
             keywords = listOf("报告", "日报", "周报", "待确认", "草案", "report", "pending", "draft"),
         ),
         CapabilityDescriptor(
+            id = "monitor_management",
+            name = "自定义监控",
+            description = "用自然语言创建/查看/删除监控规则（指定应用、阈值、工作日/周末），由本地引擎定时判断并通知",
+            category = "control",
+            toolNames = listOf(
+                "create_monitor",
+                "list_monitors",
+                "remove_monitor",
+                "monitor_history",
+            ),
+            examples = listOf(
+                "工作日微信超过 3 小时提醒我",
+                "周末玩游戏超过 2 小时提醒我",
+                "我现在有哪些监控规则？",
+            ),
+            keywords = listOf(
+                "监控", "规则", "提醒我", "超过", "低于", "达到", "定时",
+                "monitor", "rule", "alert", "threshold",
+            ),
+        ),
+        CapabilityDescriptor(
             id = "memory_management",
             name = "长期记忆",
             description = "记住用户偏好、长期目标与对建议的反馈，用于调整后续建议方式",

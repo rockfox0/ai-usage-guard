@@ -9,15 +9,18 @@ import com.aid.usageguard.data.Access
 import com.aid.usageguard.data.Container
 import com.aid.usageguard.data.repo.WhitelistRepository
 import com.aid.usageguard.data.settings.AppSettings
+import com.aid.usageguard.domain.monitor.MonitorValidator
 import com.aid.usageguard.domain.quota.FocusWindow
 import com.aid.usageguard.restriction.RestrictionMode
 import com.aid.usageguard.service.AccessibilityRestorer
 import com.aid.usageguard.service.KeepAliveGuide
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class SettingsViewModel(
     application: Application,
@@ -44,6 +47,9 @@ class SettingsViewModel(
 
     /** 守护保活状态（v1.8.3） */
     val keepAlive = MutableStateFlow(KeepAliveState())
+
+    /** 我的监控（v1.9 Phase 5：本地引擎每 15 分钟检查的自定义规则） */
+    val monitors = MutableStateFlow(MonitorsState())
 
     fun refreshPermissions() {
         val context = getApplication<Application>()
@@ -97,6 +103,53 @@ class SettingsViewModel(
 
     /** 授予自恢复权限（WRITE_SECURE_SETTINGS）的一次性 adb 命令 */
     fun adbGrantCommand(): String = KeepAliveGuide.adbGrantCommand()
+
+    /** 加载监控规则与最近触发（全部 runCatching 兜底，DB 未就绪也不崩） */
+    fun refreshMonitors() {
+        viewModelScope.launch {
+            val rules = runCatching { Container.monitors.all() }.getOrDefault(emptyList())
+            val triggers = runCatching { Container.monitors.recentTriggers(3) }.getOrDefault(emptyList())
+            val ruleUis = withContext(Dispatchers.IO) {
+                rules.map { rule ->
+                    MonitorRuleUi(
+                        id = rule.id,
+                        name = rule.name,
+                        description = runCatching {
+                            MonitorValidator.describe(rule) { pkg -> Container.usageSource.appNameOf(pkg) }
+                        }.getOrDefault(rule.name),
+                        enabled = rule.enabled,
+                    )
+                }
+            }
+            val triggerUis = triggers.take(3).map { trigger ->
+                MonitorTriggerUi(
+                    dateLabel = trigger.date.takeLast(5),
+                    ruleName = trigger.ruleName,
+                    value = trigger.value,
+                    threshold = trigger.threshold,
+                    unit = if (trigger.message.contains("次")) "次" else "分钟",
+                )
+            }
+            monitors.value = MonitorsState(loading = false, rules = ruleUis, triggers = triggerUis)
+        }
+    }
+
+    /** 启用/停用监控规则（用户主动操作，不走草案） */
+    fun setMonitorEnabled(id: String, enabled: Boolean) {
+        viewModelScope.launch {
+            runCatching { Container.monitors.setEnabled(id, enabled) }
+            refreshMonitors()
+        }
+    }
+
+    /** 删除监控规则（用户主动操作，不走草案） */
+    fun deleteMonitor(id: String) {
+        viewModelScope.launch {
+            runCatching { Container.monitors.delete(id) }
+            message.value = "已删除该监控规则"
+            refreshMonitors()
+        }
+    }
 
     /** 读取白名单添加额度（今日已添加 / 还可添加） */
     fun refreshWhitelistQuota() {
@@ -244,6 +297,29 @@ data class PermissionState(
     val hasUsageAccess: Boolean = false,
     val accessibilityOn: Boolean = false,
     val notificationsEnabled: Boolean = false,
+)
+
+/** 监控规则展示模型（name + describe 文案 + 启用状态） */
+data class MonitorRuleUi(
+    val id: String,
+    val name: String,
+    val description: String,
+    val enabled: Boolean,
+)
+
+/** 最近一次触发（dateLabel 形如 11-06） */
+data class MonitorTriggerUi(
+    val dateLabel: String,
+    val ruleName: String,
+    val value: Long,
+    val threshold: Long,
+    val unit: String,
+)
+
+data class MonitorsState(
+    val loading: Boolean = true,
+    val rules: List<MonitorRuleUi> = emptyList(),
+    val triggers: List<MonitorTriggerUi> = emptyList(),
 )
 
 /** 守护保活状态（v1.8.3）：无障碍是否在跑 / 是否可自恢复 / 是否已被系统加白 */

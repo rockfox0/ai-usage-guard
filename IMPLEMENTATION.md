@@ -391,3 +391,39 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
 - APK：versionCode 27，MD5 `f34600a9fac8864b96434113eefab410`。
 - 真机：本轮设备断开（vivo 拔线、Pixel 未装本 App），未安装/未回归；下轮设备恢复后验证
   （验证点：结构化卡片出现、正文无 JSON、图表来自本地数据、FollowUp 可点击）。
+
+---
+
+## 二十三、v1.9 Phase 5：用户自定义监控
+
+目标（规格 §10）：用户用自然语言定义监控，AI 只负责把话变成规则并解释，**本地引擎定时判断，不反复调用模型**。
+
+### 领域与存储
+- `domain/monitor/MonitorDefinition.kt`：指标 `FOREGROUND_DURATION`（分钟）/ `LAUNCH_COUNT`（次）、
+  比较 `GT/GE/LT`、周期 `EVERY_DAY/WEEKDAYS/WEEKENDS`、动作 `NOTIFY`；`packageName=null` 表示全部应用（仅时长）。
+- `domain/monitor/MonitorValidator.kt`（纯函数）：名称/阈值范围/全部应用限制/同应用同指标去重/最多 5 条；`describe()` 生成中文描述。
+- DB v6：`monitor_rule`（规则）+ `monitor_trigger`（触发历史，按「规则+日期」去重）。
+- `data/repo/MonitorRepository.kt`：规则 CRUD、启用开关、触发去重查询与记录。
+
+### 执行
+- `domain/monitor/MonitorEngine.kt`：读取已落库数据（今日总时长 / 应用排行 / 启动次数），按周期判断阈值，
+  触发时写 `monitor_trigger` 并返回结果；同规则同一天最多一次。
+- `work/MonitorCheckWorker.kt` + `AgentScheduler`：每 15 分钟检查一次（KEEP），不调模型。
+- `notify/NotificationHelper`：新增 `monitor_alert` 渠道与 `notifyMonitorTriggers()`（单条通知汇总最多 3 条触发）。
+
+### AI 接入
+- `agent/tools/MonitorTools.kt`（4 个工具，归入能力 `monitor_management`）：
+  `create_monitor`（PROPOSE 草案）、`list_monitors`、`remove_monitor`（PROPOSE）、`monitor_history`。
+- `ActionExecutor` 新增 `CREATE_MONITOR` / `DELETE_MONITOR`：确认后落库/删除；创建时再次走校验。
+- `PendingActionUi` 增加「自定义监控 / 删除监控」类型名与摘要。
+- 提示词规则 13：监控类需求走 create_monitor；不要用限额/专注时段冒充监控（那是拦截，监控只通知）。
+
+### 设置页「我的监控」卡（UI）
+- 「守护保活」之后新增卡片：顶部说明「监控由本地引擎每 15 分钟检查一次，不调用模型」；
+  空态提示用 AI 创建；每条规则显示名称 + 中文描述 + 启用 Switch + 删除按钮；
+  底部显示最近 3 条触发历史（`• 11-06 规则名 183 分钟 · 阈值 180`）；
+  进入页面/从后台返回刷新（`LaunchedEffect` + `LifecycleEventEffect(ON_RESUME)`），全部 runCatching 兜底。
+
+### 测试
+- 新增 `MonitorValidatorTest`(8)，**总计 94 个单测全部通过**；能力目录 11 个能力 / 45 个工具；APK versionCode 29，MD5 `50318e669760e073b71a65a75f6f6509`。
+- 真机：设备仍未连接（vivo 未插回），Phase 4/5 真机回归待设备恢复。

@@ -29,6 +29,8 @@ class CapabilityCatalogTest {
         "get_user_preferences", "set_ai_persona", "set_ai_analysis_enabled",
         // report_management (3)
         "generate_usage_report", "generate_report_now", "get_pending_actions",
+        // monitor_management (4)
+        "create_monitor", "list_monitors", "remove_monitor", "monitor_history",
         // memory_management (5)
         "save_memory", "list_memory", "save_goal", "list_goals", "record_feedback",
         // system_maintenance (3)
@@ -65,6 +67,7 @@ class CapabilityCatalogTest {
         assertEquals("restriction_control", CapabilityCatalog.capabilityOf("set_whitelist"))
         assertEquals("quota_control", CapabilityCatalog.capabilityOf("set_app_daily_limit"))
         assertEquals("memory_management", CapabilityCatalog.capabilityOf("save_goal"))
+        assertEquals("monitor_management", CapabilityCatalog.capabilityOf("create_monitor"))
         assertNull(CapabilityCatalog.capabilityOf("discover_capabilities"))
         assertNull(CapabilityCatalog.capabilityOf("load_capability"))
     }

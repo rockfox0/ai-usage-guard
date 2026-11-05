@@ -28,8 +28,10 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
@@ -81,12 +83,14 @@ fun SettingsScreen() {
     val quotaUsed by vm.quotaUsedMinutes.collectAsStateWithLifecycle()
     val whitelistQuota by vm.whitelistQuota.collectAsStateWithLifecycle()
     val keepAlive by vm.keepAlive.collectAsStateWithLifecycle()
+    val monitorState by vm.monitors.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) {
         vm.refreshPermissions()
         vm.refreshQuotaUsage()
         vm.refreshWhitelistQuota()
         vm.refreshKeepAlive()
+        vm.refreshMonitors()
     }
 
     // 从系统/厂商页面（无障碍、电池优化、自启动）返回后重新读取状态
@@ -95,6 +99,7 @@ fun SettingsScreen() {
         vm.refreshKeepAlive()
         vm.refreshQuotaUsage()
         vm.refreshWhitelistQuota()
+        vm.refreshMonitors()
     }
 
     // 以 DataStore 的值为 key 初始化：保存后自动同步，用户输入期间不会被覆盖
@@ -305,6 +310,78 @@ fun SettingsScreen() {
                     color = colors.onSurfaceVariant,
                     lineHeight = 17.sp,
                 )
+            }
+        }
+
+        // 我的监控（v1.9 Phase 5）：本地引擎每 15 分钟检查，不调用模型
+        item {
+            SettingsCard(title = "我的监控") {
+                Text(
+                    text = "监控由本地引擎每 15 分钟检查一次，不调用模型",
+                    fontSize = 10.sp,
+                    color = colors.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                if (monitorState.rules.isEmpty()) {
+                    Text(
+                        text = "还没有监控规则。对 AI 助手说：工作日微信超过 3 小时提醒我",
+                        fontSize = 11.sp,
+                        color = colors.onSurfaceVariant,
+                        lineHeight = 16.sp,
+                    )
+                } else {
+                    monitorState.rules.forEachIndexed { index, rule ->
+                        if (index > 0) {
+                            Spacer(Modifier.height(6.dp))
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = rule.name,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    text = rule.description,
+                                    fontSize = 11.sp,
+                                    color = colors.onSurfaceVariant,
+                                    lineHeight = 16.sp,
+                                )
+                            }
+                            Switch(
+                                checked = rule.enabled,
+                                onCheckedChange = { enabled -> vm.setMonitorEnabled(rule.id, enabled) },
+                            )
+                            IconButton(onClick = { vm.deleteMonitor(rule.id) }) {
+                                Icon(
+                                    imageVector = Icons.Filled.Delete,
+                                    contentDescription = "删除监控规则",
+                                    tint = colors.error,
+                                )
+                            }
+                        }
+                    }
+                }
+                if (monitorState.triggers.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "最近触发",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = colors.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    monitorState.triggers.forEach { trigger ->
+                        Text(
+                            text = "• ${trigger.dateLabel} ${trigger.ruleName} " +
+                                "${trigger.value} ${trigger.unit} · 阈值 ${trigger.threshold}",
+                            fontSize = 10.sp,
+                            color = colors.onSurfaceVariant,
+                            lineHeight = 15.sp,
+                        )
+                    }
+                }
             }
         }
 

@@ -41,12 +41,14 @@ object NotificationHelper {
     const val CHANNEL_GOAL_EXCEEDED = "goal_exceeded"
     const val CHANNEL_ANOMALY = "anomaly"
     const val CHANNEL_AI_REPORT = "ai_report"
+    const val CHANNEL_MONITOR = "monitor_alert"
 
     /** 固定通知 id：同一用途反复通知只会替换，不会堆积 */
     const val ID_DAILY_REMINDER = 1001
     const val ID_GOAL_EXCEEDED = 1002
     const val ID_ANOMALY = 1003
     const val ID_REPORT_DAILY = 1004
+    const val ID_MONITOR = 1005
     const val ID_REPORT_WEEKLY = 1005
 
     private const val PREFS = "usageguard_notify_state"
@@ -61,7 +63,8 @@ object NotificationHelper {
     private const val MIN_INTERVAL_ANOMALY = 10L * 60L * 1000L
     private const val MIN_INTERVAL_REPORT = 10L * 60L * 1000L
 
-    // ------------------------------------------------------------------ 渠道
+    // ------------------------------------------------------------------ 渠道（v1.9 Phase 5 增加自定义监控）
+
 
     /** 创建/补齐所有通知渠道（幂等；App.onCreate 里也会建，这里保证 Worker 场景同样可用） */
     fun ensureChannels(context: Context) {
@@ -72,6 +75,7 @@ object NotificationHelper {
             Channel(CHANNEL_GOAL_EXCEEDED, "超过使用目标", NotificationManager.IMPORTANCE_DEFAULT),
             Channel(CHANNEL_ANOMALY, "异常使用提醒", NotificationManager.IMPORTANCE_HIGH),
             Channel(CHANNEL_AI_REPORT, "AI 使用报告", NotificationManager.IMPORTANCE_LOW),
+            Channel(CHANNEL_MONITOR, "自定义监控提醒", NotificationManager.IMPORTANCE_DEFAULT),
         )
         channels.forEach { item ->
             val channel = NotificationChannel(item.id, item.name, item.importance)
@@ -90,6 +94,7 @@ object NotificationHelper {
                 NotificationHelper.CHANNEL_DAILY_REMINDER -> "每天的使用时长小结与提醒"
                 NotificationHelper.CHANNEL_GOAL_EXCEEDED -> "当天使用时长超出你设定的目标时提醒"
                 NotificationHelper.CHANNEL_ANOMALY -> "检测到异常使用模式（用量激增、深夜使用、连续过长等）"
+                NotificationHelper.CHANNEL_MONITOR -> "你自己设置的监控规则被触发时提醒"
                 else -> "AI 生成的日报 / 周报"
             }
     }
@@ -183,6 +188,24 @@ object NotificationHelper {
     }
 
     /** 本地行为分析产出的异常事件（最多展开 3 条） */
+    /**
+     * 自定义监控触发通知（v1.9 Phase 5）：本地规则引擎判定后调用，不经过模型。
+     * 同一规则同一天只触发一次，由 MonitorEngine 去重。
+     */
+    suspend fun notifyMonitorTriggers(
+        context: Context,
+        triggers: List<com.aid.usageguard.domain.monitor.MonitorTriggerResult>,
+        settings: AppSettings? = null,
+    ): Boolean {
+        if (triggers.isEmpty()) return false
+        val cfg = settingsOf(settings)
+        if (!cfg.notificationEnabled) return false
+        if (!canNotify(context)) return false
+        val title = if (triggers.size == 1) "监控提醒：${triggers[0].ruleName}" else "有 ${triggers.size} 条监控规则被触发"
+        val body = triggers.take(3).joinToString("\n") { "· ${it.message}" }
+        return _post(context, CHANNEL_MONITOR, ID_MONITOR, title, body)
+    }
+
     suspend fun notifyAnomaly(
         context: Context,
         events: List<BehaviorEventModel>,

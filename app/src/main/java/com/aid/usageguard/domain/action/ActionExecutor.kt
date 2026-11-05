@@ -26,6 +26,8 @@ class ActionExecutor(
     private val usage: UsageRepository,
     private val quota: QuotaRepository,
     private val whitelist: WhitelistRepository,
+    /** v1.9 Phase 5：自定义监控规则落库 */
+    private val monitors: com.aid.usageguard.data.repo.MonitorRepository,
 ) {
 
     data class Result(
@@ -246,6 +248,53 @@ class ActionExecutor(
                 "REFRESH_USAGE_DATA" -> {
                     val result = usage.refresh()
                     Result(result.hasAccess, "已同步使用数据：${result.sessions} 个会话 / ${result.daysTouched} 天")
+                }
+
+                "CREATE_MONITOR" -> {
+                    val p = params(action)
+                    val draft = com.aid.usageguard.domain.monitor.MonitorDefinition(
+                        id = "",
+                        name = p.optString("name").ifBlank { "自定义监控" },
+                        packageName = p.optString("package_name").takeIf { it.isNotBlank() },
+                        metric = runCatching {
+                            com.aid.usageguard.domain.monitor.MonitorMetric.valueOf(p.getString("metric"))
+                        }.getOrElse { com.aid.usageguard.domain.monitor.MonitorMetric.FOREGROUND_DURATION },
+                        operator = runCatching {
+                            com.aid.usageguard.domain.monitor.MonitorOperator.valueOf(p.getString("operator"))
+                        }.getOrElse { com.aid.usageguard.domain.monitor.MonitorOperator.GREATER_THAN },
+                        threshold = p.optLong("threshold"),
+                        schedule = runCatching {
+                            com.aid.usageguard.domain.monitor.MonitorSchedule.valueOf(
+                                p.optString("schedule", "EVERY_DAY"),
+                            )
+                        }.getOrElse { com.aid.usageguard.domain.monitor.MonitorSchedule.EVERY_DAY },
+                        action = com.aid.usageguard.domain.monitor.MonitorAction.NOTIFY,
+                        timeWindow = p.optString("time_window", "DAILY"),
+                    )
+                    val existing = monitors.all()
+                    when (val v = com.aid.usageguard.domain.monitor.MonitorValidator.validate(draft, existing)) {
+                        is com.aid.usageguard.domain.monitor.MonitorValidator.Result.Rejected ->
+                            Result(false, v.reason, error = "monitor_invalid")
+
+                        com.aid.usageguard.domain.monitor.MonitorValidator.Result.Ok -> {
+                            val saved = monitors.create(draft)
+                            Result(
+                                true,
+                                "监控规则已创建：${com.aid.usageguard.domain.monitor.MonitorValidator.describe(saved)}",
+                                JSONObject().put("ruleId", saved.id).toString(),
+                            )
+                        }
+                    }
+                }
+
+                "DELETE_MONITOR" -> {
+                    val ruleId = params(action).optString("rule_id")
+                    if (ruleId.isBlank()) {
+                        Result(false, "缺少 rule_id", error = "monitor_invalid")
+                    } else {
+                        monitors.delete(ruleId)
+                        Result(true, "监控规则已删除", JSONObject().put("ruleId", ruleId).toString())
+                    }
                 }
 
                 else -> Result(false, "不支持的操作类型：${action.type}", error = "unsupported_type")

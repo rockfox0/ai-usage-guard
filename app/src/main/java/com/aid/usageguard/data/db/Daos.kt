@@ -285,3 +285,36 @@ interface AgentFeedbackDao {
     @Query("DELETE FROM agent_feedback")
     suspend fun clear()
 }
+
+@Dao
+interface MonitorRuleDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: MonitorRuleEntity)
+
+    @Query("SELECT * FROM monitor_rule ORDER BY createdAt DESC")
+    suspend fun all(): List<MonitorRuleEntity>
+
+    @Query("SELECT * FROM monitor_rule WHERE enabled = 1")
+    suspend fun enabled(): List<MonitorRuleEntity>
+
+    @Query("SELECT * FROM monitor_rule WHERE id = :id")
+    suspend fun byId(id: String): MonitorRuleEntity?
+
+    @Query("DELETE FROM monitor_rule WHERE id = :id")
+    suspend fun delete(id: String)
+
+    @Query("UPDATE monitor_rule SET enabled = :enabled WHERE id = :id")
+    suspend fun setEnabled(id: String, enabled: Boolean)
+}
+
+@Dao
+interface MonitorTriggerDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(item: MonitorTriggerEntity)
+
+    @Query("SELECT * FROM monitor_trigger ORDER BY triggeredAt DESC LIMIT :limit")
+    suspend fun recent(limit: Int = 50): List<MonitorTriggerEntity>
+
+    @Query("SELECT COUNT(*) FROM monitor_trigger WHERE ruleId = :ruleId AND date = :date")
+    suspend fun countFor(ruleId: String, date: String): Int
+}

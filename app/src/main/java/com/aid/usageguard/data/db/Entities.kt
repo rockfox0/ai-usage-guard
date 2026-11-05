@@ -195,3 +195,33 @@ data class AgentFeedbackEntity(
     val reason: String,
     val createdAt: Long,
 )
+
+/** 自定义监控规则（v1.9 Phase 5） */
+@Entity(tableName = "monitor_rule")
+data class MonitorRuleEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    /** 空串表示全部应用 */
+    val packageName: String,
+    val metric: String,
+    val operator: String,
+    val threshold: Long,
+    val schedule: String,
+    val action: String,
+    val timeWindow: String,
+    val enabled: Boolean,
+    val createdAt: Long,
+)
+
+/** 监控触发记录（同一规则同一天只触发一次） */
+@Entity(tableName = "monitor_trigger")
+data class MonitorTriggerEntity(
+    @PrimaryKey val id: String,
+    val ruleId: String,
+    val ruleName: String,
+    val date: String,
+    val value: Long,
+    val threshold: Long,
+    val message: String,
+    val triggeredAt: Long,
+)
