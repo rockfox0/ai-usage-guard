@@ -481,3 +481,25 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
 - 新增 `ModelRouterTest`(4)、`SubAgentPolicyTest`(5)、`SubAgentSnapshotsTest`(4)；
   **总计 124 个单测全部通过**；APK versionCode 31，MD5 `2ce17a06b51e662aecc6140ac4a1180c`。
 - 真机：设备仍未连接，Phase 4/5/6/7 真机回归待设备恢复。
+
+---
+
+## 二十六、真机验证记录（Pixel 6 / Android 13，v33）
+
+设备：Pixel 6（oriole，Android 13），versionCode 33，`adb` 可连但锁屏（无法解锁 UI）。
+
+已完成：
+- 安装 + 权限：`WRITE_SECURE_SETTINGS`、`POST_NOTIFICATIONS`、`GET_USAGE_STATS`（appops）、无障碍绑定成功；
+- 保活：关闭无障碍（`enabled=0`）后 **约 20 秒自动恢复**（`enabled=1` 且服务重新绑定）；
+- 常驻通知：`guard_alive` 渠道存在；
+- 监控引擎（Phase 5）：注入「全部应用 1 分钟」规则 → 调试广播触发
+  `MonitorEngine: monitor triggered ... value=47 threshold=1`，写入 `monitor_trigger`，发出 `monitor_alert` 通知；
+- 清理了测试规则/触发记录，避免留下假数据。
+
+新增调试入口（**仅 debuggable 构建生效**，release 直接 return）：
+- `debug/DebugReceiver` + manifest 声明；
+- `adb shell am broadcast -n com.aid.usageguard/.debug.DebugReceiver -a com.aid.usageguard.DEBUG_RUN_MONITORS`
+  （另有 `DEBUG_RUN_SYNC` / `DEBUG_RUN_PROACTIVE`）；
+- 用于真机验收绕过 15/60 分钟周期等待。
+
+未完成（需要解锁设备 + 配置 AI Key）：设置页两张卡片截图、结构化回复、监控创建 UI、Phase 2/3 对话回归。

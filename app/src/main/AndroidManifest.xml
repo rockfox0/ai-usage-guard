@@ -70,5 +70,15 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/guard_service" />
         </service>
+        <!-- 仅 debug 构建生效（BuildConfig.DEBUG 检查），供真机验收手动触发周期任务 -->
+        <receiver
+            android:name=".debug.DebugReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.aid.usageguard.DEBUG_RUN_MONITORS" />
+                <action android:name="com.aid.usageguard.DEBUG_RUN_SYNC" />
+                <action android:name="com.aid.usageguard.DEBUG_RUN_PROACTIVE" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

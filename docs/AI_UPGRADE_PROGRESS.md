@@ -14,7 +14,15 @@
 | 7 | 模型路由 + 只读专家子 Agent（ai_planner_model、并行 2 专家、预算/策略门控） | ✅ 代码/单测完成，真机待补（设备未连接） | `agent/llm/ModelRouter.kt`、`agent/multi/*`、`LlmClientFactory` 覆盖模型；124 单测；APK v31 |
 | 贯穿 | Agent Benchmark（Case 1–8） | ✅ 完成 | `app/src/test/.../agent/bench/AgentBenchmarkTest.kt`；`scripts/agent_bench.sh`；`docs/AGENT_BENCHMARK.md`；8/8 通过、总耗时 51ms |
 
-## Phase 2/3 真机验证（v26）
+## 真机验证（Pixel 6 / Android 13，v33）
+
+- 安装/权限（WRITE_SECURE_SETTINGS、POST_NOTIFICATIONS、GET_USAGE_STATS）+ 无障碍绑定 ✅
+- 保活自恢复：关闭无障碍后约 20 秒自动恢复 ✅
+- 监控引擎：注入规则 → 调试广播 → `monitor triggered value=47 threshold=1` + 写入触发记录 + 通知 ✅
+- 调试入口：`debug/DebugReceiver`（仅 debuggable 构建），支持手动触发监控/同步/主动分析
+- 待解锁后补：设置页卡片、结构化回复、监控创建 UI、Phase 2/3 对话回归（另需 AI Key）
+
+## Phase 2/3 真机验证（vivo，v26）
 
 - 规划：`agent_memory(kind=plan)` → mode=ANALYSIS，3 步（30 天口径/排行趋势/评分健康度），4 条完成条件；执行只调用 `get_usage_trend`、`get_usage_score`
 - 数据不足：回答明确「30 天里只有 9 天有记录，21 天没有数据」
