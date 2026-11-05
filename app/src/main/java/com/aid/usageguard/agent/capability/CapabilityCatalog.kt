@@ -141,6 +141,28 @@ object CapabilityCatalog {
             keywords = listOf("报告", "日报", "周报", "待确认", "草案", "report", "pending", "draft"),
         ),
         CapabilityDescriptor(
+            id = "memory_management",
+            name = "长期记忆",
+            description = "记住用户偏好、长期目标与对建议的反馈，用于调整后续建议方式",
+            category = "config",
+            toolNames = listOf(
+                "save_memory",
+                "list_memory",
+                "save_goal",
+                "list_goals",
+                "record_feedback",
+            ),
+            examples = listOf(
+                "记住我更喜欢温和一点的提醒",
+                "我的目标是晚上少玩游戏",
+                "以后别再推荐这种方案了",
+            ),
+            keywords = listOf(
+                "记住", "记忆", "偏好", "目标", "别再", "反馈", "习惯我",
+                "remember", "memory", "preference", "goal", "feedback",
+            ),
+        ),
+        CapabilityDescriptor(
             id = "system_maintenance",
             name = "系统设置与数据",
             description = "查看当前设置、刷新使用数据、切换主题",

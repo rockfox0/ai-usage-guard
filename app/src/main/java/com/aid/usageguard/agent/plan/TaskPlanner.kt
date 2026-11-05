@@ -13,7 +13,7 @@ import org.json.JSONObject
  */
 object TaskPlanner {
 
-    const val MAX_STEPS = 5
+    const val MAX_STEPS = 3
 
     fun systemPrompt(): String = buildString {
         append("你是手机使用管理 Agent 的任务规划器。根据用户目标，输出一个 JSON 执行计划，不要输出任何解释。\n")

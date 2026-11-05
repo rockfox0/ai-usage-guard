@@ -328,3 +328,36 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
   （为在 JVM 单测里解析 JSON，新增 test 依赖 `org.json:json`）
 
 真机：APK 已安装（versionCode 23）。设备当时锁屏/被占用，Phase 2 的规划/评估链路真机回归未完成，留待下轮设备空闲时补测（Case 2/4）。MD5 `bd98aac80109390a44a6fac7786847f7`
+
+---
+
+## 二十一、v1.9 Phase 3：上下文工程 + 长期记忆
+
+### 上下文工程
+- `agent/context/ContextEngine.kt`：`conversationSummary(sessionId)` 取最近 12 条之外的更早消息，
+  用 `ConversationCompressor`（纯函数）压缩成「更早对话摘要」注入系统提示词（不额外消耗模型请求）；
+  压缩规则：只取用户消息、去重、单条截断 40 字、最多 6 条、总长 ≤500 字。
+- 系统提示词顺序：基础规则 → 本地数据快照 → 页面上下文 → persona → **长期记忆** → **更早对话摘要**；
+  日志 `prompt memory: N chars` / `prompt conversation summary: N chars` 可观测。
+
+### 长期记忆（DB v5）
+- 新增表：
+  - `agent_memory(kind, memKey, valueJson, confidence, updatedAt)`：kind=profile（偏好）/ decision（建议记录）
+  - `agent_goal(id, goal, targetPeriod, status, createdAt, updatedAt)`：长期目标
+  - `agent_feedback(id, targetType, targetId, signal, reason, createdAt)`：REJECT / PREFER / ACCEPT
+- `data/repo/MemoryRepository.kt`：画像、目标、反馈、决策的读写；目标按文本去重（同目标更新而不是新增）。
+- `agent/memory/MemoryEngine.kt`：
+  - `promptSection()` 渲染记忆摘要（偏好 / 进行中目标 / 被拒建议 / 表达过的偏好 + "不要原样重复被拒方案"）；
+  - `recordFeedbackFromInput()` 用 `FeedbackDetector`（纯本地规则，中英文）自动记录自然语言反馈；
+  - `recordDecision()` 把生成的待确认草案记入决策记忆；`wasRejectedBefore()` 关键词重合检索。
+- `agent/memory/FeedbackDetector.kt`：太严格/别提醒/别推荐/温和/渐进/关注睡眠… → REJECT / PREFER。
+- 新增工具（5 个，归入能力 `memory_management`）：`save_memory`、`list_memory`、`save_goal`、`list_goals`、`record_feedback`；
+  它们只改 Agent 自己的记忆（不涉及系统限制/用户配置），因此为 CONTROL 直接执行。
+- `AgentLoop`：chat 入口自动识别反馈；系统提示词注入记忆摘要与对话摘要；PROPOSE 草案成功后记入 DecisionMemory。
+- `AssistantViewModel.cancelAction`：用户取消草案 → 写入 REJECT 反馈（以后避免原样重复该建议）。
+- 能力目录从 9 → 10 个能力、工具 36 → 41 个（含 5 个记忆工具），目录单测同步更新。
+
+### 测试
+- 新增 `FeedbackDetectorTest`(4)、`MemoryPromptTest`(3)、`ConversationCompressorTest`(4)
+- **总计 77 个单测全部通过**；APK 已构建（versionCode 25，MD5 `fb4c9dbc156032ce0a59bd1b03e66ea2`）
+- 真机安装/回归：设备被用户占用中，未安装；下一轮设备空闲时补（验证：英文反馈写入 `agent_feedback`、记忆注入日志、对话摘要日志）

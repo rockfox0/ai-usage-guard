@@ -20,8 +20,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         DailyScoreEntity::class,
         PendingActionEntity::class,
         AppDailyLimitEntity::class,
+        AgentMemoryEntity::class,
+        AgentGoalEntity::class,
+        AgentFeedbackEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -36,6 +39,9 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun dailyScoreDao(): DailyScoreDao
     abstract fun pendingActionDao(): PendingActionDao
     abstract fun appDailyLimitDao(): AppDailyLimitDao
+    abstract fun agentMemoryDao(): AgentMemoryDao
+    abstract fun agentGoalDao(): AgentGoalDao
+    abstract fun agentFeedbackDao(): AgentFeedbackDao
 
     companion object {
         /** v1 → v2：新增每日评分表（保留历史使用数据，不破坏性迁移） */
@@ -104,6 +110,44 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v4 → v5：长期记忆（画像/决策）、用户目标、反馈 */
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `agent_memory` (
+                        `kind` TEXT NOT NULL,
+                        `memKey` TEXT NOT NULL,
+                        `valueJson` TEXT NOT NULL,
+                        `confidence` REAL NOT NULL,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`kind`, `memKey`)
+                    )""".trimIndent(),
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `agent_goal` (
+                        `id` TEXT NOT NULL,
+                        `goal` TEXT NOT NULL,
+                        `targetPeriod` TEXT NOT NULL,
+                        `status` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )""".trimIndent(),
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `agent_feedback` (
+                        `id` TEXT NOT NULL,
+                        `targetType` TEXT NOT NULL,
+                        `targetId` TEXT NOT NULL,
+                        `signal` TEXT NOT NULL,
+                        `reason` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )""".trimIndent(),
+                )
+            }
+        }
+
         @Volatile
         private var instance: AppDatabase? = null
 
@@ -113,7 +157,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "usage_guard.db",
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { instance = it }

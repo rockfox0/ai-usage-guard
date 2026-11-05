@@ -159,6 +159,7 @@ adb shell settings put secure accessibility_enabled 1
 | v1.8.3 | 守护保活：前台常驻服务、无障碍自恢复（adb 一次性授权）、WorkManager 看门狗、开机自启、保活引导卡 |
 | v1.9 Phase 1 | 动态能力发现：9 个能力目录覆盖 34 个工具、本地路由 + `discover_capabilities`/`load_capability` 元工具、执行器能力门禁（CHAT 首轮工具从 36 → 8） |
 | v1.9 Phase 2 | 动态任务规划 + 结果评估：Direct/Analysis/Goal 模式、一次请求产出 JSON 计划、结果不足补一轮、30 天数据不足明确告知（66 单测） |
+| v1.9 Phase 3 | 上下文工程 + 长期记忆：更早对话摘要压缩、DB v5（画像/目标/反馈/决策）、自然语言反馈识别、记忆注入提示词、5 个记忆工具（77 单测） |
 
 详细实现说明见 [IMPLEMENTATION.md](IMPLEMENTATION.md)，各版本真机验收报告见 [docs/reports/](docs/reports/)，
 需求原文见 [docs/spec.md](docs/spec.md)。

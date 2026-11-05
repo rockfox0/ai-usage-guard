@@ -16,7 +16,9 @@ import com.aid.usageguard.agent.llm.LlmResponse
 import com.aid.usageguard.agent.llm.LlmToolSpec
 import com.aid.usageguard.agent.llm.LlmStreamUnavailableException
 import com.aid.usageguard.agent.llm.normalizeApiBase
+import com.aid.usageguard.agent.context.ContextEngine
 import com.aid.usageguard.agent.memory.AgentMemory
+import com.aid.usageguard.agent.memory.MemoryEngine
 import com.aid.usageguard.agent.plan.EvaluationVerdict
 import com.aid.usageguard.agent.plan.ResultEvaluator
 import com.aid.usageguard.agent.plan.TaskMode
@@ -25,6 +27,7 @@ import com.aid.usageguard.agent.plan.TaskPlan
 import com.aid.usageguard.agent.plan.TaskPlanner
 import com.aid.usageguard.agent.tools.BehaviorTools
 import com.aid.usageguard.agent.tools.CapabilityTools
+import com.aid.usageguard.agent.tools.MemoryTools
 import com.aid.usageguard.agent.tools.ControlTools
 import com.aid.usageguard.agent.tools.GuardTools
 import com.aid.usageguard.agent.tools.PendingActionTools
@@ -100,6 +103,14 @@ class AgentLoop(
 
     private val memory = AgentMemory(messageDao)
 
+    /** 长期记忆引擎（v1.9 Phase 3）：Container 初始化后可用；失败时降级为无记忆 */
+    private val memoryEngine: MemoryEngine? by lazy {
+        runCatching { MemoryEngine(com.aid.usageguard.data.Container.memory) }.getOrNull()
+    }
+
+    /** 上下文压缩（更早对话摘要） */
+    private val contextEngine: ContextEngine by lazy { ContextEngine(memory) }
+
     /** 当前任务 id（控制类工具把待确认草案归属到具体任务；任务结束恢复） */
     private val currentTaskId = AtomicReference("")
 
@@ -127,6 +138,7 @@ class AgentLoop(
             addAll(GuardTools(settings).all)
             addAll(ScoreTools().all)
             addAll(CapabilityTools().all)
+            addAll(MemoryTools { memoryEngine }.all)
         },
     )
 
@@ -225,11 +237,14 @@ class AgentLoop(
                 ok = false,
             )
         }
+        val session = sessionId.ifBlank { AgentMemory.DEFAULT_SESSION_ID }
+        // 自然语言反馈（太严格/别提醒/温和点…）先落长期记忆，后续建议据此调整
+        runCatching { memoryEngine?.recordFeedbackFromInput(input) }
         return executeTask(
             TaskRequest(
-                sessionId = sessionId.ifBlank { AgentMemory.DEFAULT_SESSION_ID },
+                sessionId = session,
                 prompt = input,
-                systemPrompt = chatSystemPrompt(context),
+                systemPrompt = chatSystemPrompt(context, session),
                 useMemory = true,
                 requireToolUse = false,
                 scope = TaskScope.CHAT,
@@ -436,7 +451,10 @@ class AgentLoop(
             }
             var plan: TaskPlan? = null
             var replanned = false
-            if (request.scope == TaskScope.CHAT && mode != TaskMode.DIRECT) {
+            // 规划要占 1 次模型请求；剩余不足 3 次时直接走直答，避免"规划完就没额度执行"
+            if (request.scope == TaskScope.CHAT && mode != TaskMode.DIRECT &&
+                budget.remainingModelRequests >= 3
+            ) {
                 val planStop = budget.tryConsumeModelRequest()
                 if (planStop != null) {
                     budgetStop = planStop
@@ -455,8 +473,13 @@ class AgentLoop(
                     }.getOrNull()
                     if (parsed != null) {
                         plan = parsed
-                        // 预加载计划所需能力（只加载目录里存在的，scope 过滤仍由 specsForCapabilities 保证）
-                        parsed.steps.flatMap { it.capabilities }.forEach { loadedCapabilities.add(it) }
+                        // 预加载计划所需能力：排除「报告」能力——它会触发嵌套报告任务、共享预算，
+                        // 在规划任务里极易把 6 次模型请求烧穿（设备回归发现）。需要时模型可手动 load。
+                        parsed.steps.flatMap { it.capabilities }
+                            .filter { capId ->
+                                com.aid.usageguard.agent.capability.CapabilityCatalog.byId(capId)?.category != "report"
+                            }
+                            .forEach { loadedCapabilities.add(it) }
                         visibleSpecs = computeVisibleSpecs()
                         messages.add(LlmMessage.user(TaskPlanner.directive(parsed)))
                         Log.i(
@@ -653,6 +676,20 @@ class AgentLoop(
                     if (result.ok && registry.find(call.name)?.kind?.let { it != ToolKind.QUERY } == true) {
                         sideEffectsPerformed = true
                     }
+                    // v1.9 Phase 3：把生成的草案记入决策记忆（供"这建议以前提过/被拒过"检索）
+                    if (result.ok && registry.find(call.name)?.kind == ToolKind.PROPOSE) {
+                        runCatching {
+                            val obj = org.json.JSONObject(result.output)
+                            val opId = obj.optString("opId")
+                            if (opId.isNotBlank()) {
+                                memoryEngine?.recordDecision(
+                                    opId = opId,
+                                    type = obj.optString("type"),
+                                    message = obj.optString("message"),
+                                )
+                            }
+                        }
+                    }
                 }
                 if (stoppedByBudget) break
 
@@ -684,6 +721,11 @@ class AgentLoop(
             val budgetReason = budgetStop
             val budgetExhausted = budgetReason != null
             if (budgetReason != null) {
+                // 预算耗尽且模型还没给正文时，至少用已执行工具的结果组装部分结论，而不是只回一句预算提示
+                if (text.isBlank()) {
+                    runCatching { text = fallbackFromTools(usedTools, messages) }.getOrNull()
+                    text = text.trim()
+                }
                 val note = "（本次任务已达到资源预算上限：$budgetReason。以上为已完成的部分结果。）"
                 text = if (text.isBlank()) note else "$text\n\n$note"
             }
@@ -804,13 +846,17 @@ class AgentLoop(
     // Prompt
     // ------------------------------------------------------------------
 
-    private suspend fun chatSystemPrompt(context: AgentContext? = null): String =
-        systemPrompt(CHAT_SYSTEM, context)
+    private suspend fun chatSystemPrompt(context: AgentContext? = null, sessionId: String? = null): String =
+        systemPrompt(CHAT_SYSTEM, context, sessionId)
 
     private suspend fun reportSystemPrompt(): String = systemPrompt(REPORT_SYSTEM, null)
 
-    /** 基础系统提示词 + 页面/对话对象上下文快照 + 用户个性化 persona */
-    private suspend fun systemPrompt(base: String, context: AgentContext? = null): String {
+    /** 基础系统提示词 + 页面/对话对象上下文快照 + 用户个性化 persona + 长期记忆/对话摘要 */
+    private suspend fun systemPrompt(
+        base: String,
+        context: AgentContext? = null,
+        sessionId: String? = null,
+    ): String {
         val prefs = runCatching { settings.current() }.getOrDefault(AppSettings.DEFAULT)
         return buildString {
             append(base.replace("%TODAY%", UsageEventSource.todayDate()))
@@ -820,6 +866,20 @@ class AgentLoop(
             if (section.isNotBlank()) append("\n\n").append(section)
             val persona = personaSection(prefs)
             if (persona.isNotBlank()) append("\n\n").append(persona)
+            // v1.9 Phase 3：长期记忆（偏好/目标/被拒建议）——只影响建议方式，不能当数据来源
+            val memorySection = runCatching { memoryEngine?.promptSection() }.getOrNull()
+            if (!memorySection.isNullOrBlank()) {
+                append("\n\n").append(memorySection)
+                Log.i(TAG, "prompt memory: ${memorySection.length} chars")
+            }
+            // v1.9 Phase 3：更早对话摘要（本地压缩，不额外消耗模型请求）
+            if (!sessionId.isNullOrBlank()) {
+                val summary = runCatching { contextEngine.conversationSummary(sessionId) }.getOrNull()
+                if (!summary.isNullOrBlank()) {
+                    append("\n\n【更早对话摘要】").append(summary)
+                    Log.i(TAG, "prompt conversation summary: ${summary.length} chars")
+                }
+            }
         }
     }
 

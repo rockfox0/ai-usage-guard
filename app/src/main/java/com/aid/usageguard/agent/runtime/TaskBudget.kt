@@ -30,6 +30,9 @@ class TaskBudget(
     private var stoppedReason: String? = null
 
     val modelRequests: Int get() = modelRequestsUsed
+
+    /** 剩余模型请求额度（规划器用它决定"值不值得先规划"） */
+    val remainingModelRequests: Int get() = (maxModelRequests - modelRequestsUsed).coerceAtLeast(0)
     val toolCalls: Int get() = toolCallsUsed
 
     /** 触发停止的原因（null 表示预算未耗尽） */

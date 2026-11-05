@@ -5,6 +5,7 @@ import com.aid.usageguard.agent.contract.AgentRuntime
 import com.aid.usageguard.agent.contract.StubAgentRuntime
 import com.aid.usageguard.data.db.AppDatabase
 import com.aid.usageguard.data.repo.ActionDraftRepository
+import com.aid.usageguard.data.repo.MemoryRepository
 import com.aid.usageguard.data.repo.BehaviorRepository
 import com.aid.usageguard.data.repo.QuotaRepository
 import com.aid.usageguard.data.repo.WhitelistRepository
@@ -54,6 +55,10 @@ object Container {
     lateinit var actionDrafts: ActionDraftRepository
         private set
 
+    /** v1.9 Phase 3：长期记忆（画像 / 目标 / 反馈 / 决策） */
+    lateinit var memory: MemoryRepository
+        private set
+
     /** v1.7：确认后由本地执行器执行（参数来自草案，不重新生成） */
     lateinit var actionExecutor: ActionExecutor
         private set
@@ -83,6 +88,7 @@ object Container {
             whitelist = WhitelistRepository(settings)
             restrictions = AccessibilityRestrictionController(db)
             actionDrafts = ActionDraftRepository(db)
+            memory = MemoryRepository(db)
             actionExecutor = ActionExecutor(settings, restrictions, usage, quota, whitelist)
             initialized = true
         }

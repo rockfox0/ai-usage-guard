@@ -160,3 +160,38 @@ data class AppDailyLimitEntity(
     val dailyLimitMinutes: Int,
     val updatedAt: Long,
 )
+
+/** 长期记忆：用户画像 / 决策记录等，kind 区分（v1.9 Phase 3） */
+@Entity(tableName = "agent_memory", primaryKeys = ["kind", "memKey"])
+data class AgentMemoryEntity(
+    val kind: String,
+    val memKey: String,
+    val valueJson: String,
+    val confidence: Double = 1.0,
+    val updatedAt: Long,
+)
+
+/** 用户长期目标（v1.9 Phase 3）：目标 + 时间段 + 状态（ACTIVE / DONE / PAUSED） */
+@Entity(tableName = "agent_goal")
+data class AgentGoalEntity(
+    @PrimaryKey val id: String,
+    val goal: String,
+    val targetPeriod: String,
+    val status: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+)
+
+/** 用户反馈（v1.9 Phase 3）：拒绝/偏好信号，用于调整后续建议 */
+@Entity(tableName = "agent_feedback")
+data class AgentFeedbackEntity(
+    @PrimaryKey val id: String,
+    /** suggestion / plan / insight / general */
+    val targetType: String,
+    /** 关联对象 id（建议/草案/洞察），可为空 */
+    val targetId: String,
+    /** REJECT / PREFER / ACCEPT */
+    val signal: String,
+    val reason: String,
+    val createdAt: Long,
+)

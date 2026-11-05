@@ -231,3 +231,57 @@ interface AppDailyLimitDao {
     @Query("DELETE FROM app_daily_limit")
     suspend fun clear()
 }
+
+@Dao
+interface AgentMemoryDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: AgentMemoryEntity)
+
+    @Query("SELECT * FROM agent_memory WHERE kind = :kind")
+    suspend fun byKind(kind: String): List<AgentMemoryEntity>
+
+    @Query("SELECT * FROM agent_memory ORDER BY updatedAt DESC LIMIT :limit")
+    suspend fun recent(limit: Int = 50): List<AgentMemoryEntity>
+
+    @Query("DELETE FROM agent_memory WHERE kind = :kind AND memKey = :key")
+    suspend fun delete(kind: String, key: String)
+
+    @Query("DELETE FROM agent_memory")
+    suspend fun clear()
+}
+
+@Dao
+interface AgentGoalDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: AgentGoalEntity)
+
+    @Query("SELECT * FROM agent_goal WHERE status = 'ACTIVE' ORDER BY updatedAt DESC")
+    suspend fun active(): List<AgentGoalEntity>
+
+    @Query("SELECT * FROM agent_goal ORDER BY updatedAt DESC LIMIT :limit")
+    suspend fun recent(limit: Int = 20): List<AgentGoalEntity>
+
+    @Query("SELECT * FROM agent_goal WHERE id = :id")
+    suspend fun byId(id: String): AgentGoalEntity?
+
+    @Query("UPDATE agent_goal SET status = :status, updatedAt = :now WHERE id = :id")
+    suspend fun updateStatus(id: String, status: String, now: Long)
+
+    @Query("DELETE FROM agent_goal")
+    suspend fun clear()
+}
+
+@Dao
+interface AgentFeedbackDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(item: AgentFeedbackEntity)
+
+    @Query("SELECT * FROM agent_feedback ORDER BY createdAt DESC LIMIT :limit")
+    suspend fun recent(limit: Int = 20): List<AgentFeedbackEntity>
+
+    @Query("SELECT COUNT(*) FROM agent_feedback WHERE createdAt >= :since")
+    suspend fun countSince(since: Long): Int
+
+    @Query("DELETE FROM agent_feedback")
+    suspend fun clear()
+}

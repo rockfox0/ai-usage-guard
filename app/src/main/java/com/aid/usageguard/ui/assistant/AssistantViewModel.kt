@@ -296,6 +296,15 @@ class AssistantViewModel(
         updateCard(opId) { it.copy(busy = true) }
         viewModelScope.launch {
             PendingActionPresenter.cancel(actionDrafts, opId)
+            // v1.9 Phase 3：用户取消草案 → 记入 FeedbackMemory，后续避免原样重复该建议
+            runCatching {
+                com.aid.usageguard.data.Container.memory.recordFeedback(
+                    targetType = "suggestion",
+                    targetId = opId,
+                    signal = "REJECT",
+                    reason = "用户取消了该待确认操作：${card.typeLabel}${card.changeLabel.let { if (it.isBlank()) "" else "（$it）" }}",
+                )
+            }
             updateCard(opId) { it.copy(busy = false, success = false, statusText = "已取消") }
         }
     }
