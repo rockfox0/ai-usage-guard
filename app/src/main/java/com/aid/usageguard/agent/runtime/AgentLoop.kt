@@ -2,6 +2,7 @@ package com.aid.usageguard.agent.runtime
 
 import android.content.Context
 import android.util.Log
+import com.aid.usageguard.agent.capability.CapabilityDiscovery
 import com.aid.usageguard.agent.contract.AgentContext
 import com.aid.usageguard.agent.contract.AgentEvent
 import com.aid.usageguard.agent.contract.AgentOutcome
@@ -12,10 +13,12 @@ import com.aid.usageguard.agent.llm.LlmClientFactory
 import com.aid.usageguard.agent.llm.LlmException
 import com.aid.usageguard.agent.llm.LlmMessage
 import com.aid.usageguard.agent.llm.LlmResponse
+import com.aid.usageguard.agent.llm.LlmToolSpec
 import com.aid.usageguard.agent.llm.LlmStreamUnavailableException
 import com.aid.usageguard.agent.llm.normalizeApiBase
 import com.aid.usageguard.agent.memory.AgentMemory
 import com.aid.usageguard.agent.tools.BehaviorTools
+import com.aid.usageguard.agent.tools.CapabilityTools
 import com.aid.usageguard.agent.tools.ControlTools
 import com.aid.usageguard.agent.tools.GuardTools
 import com.aid.usageguard.agent.tools.PendingActionTools
@@ -72,7 +75,10 @@ import java.util.concurrent.atomic.AtomicReference
  * - 设置 / 限制类工具只生成待确认操作草案，用户确认后由本地 ActionExecutor 执行；
  * - 单任务预算：模型请求 ≤6、工具调用 ≤12、墙钟 ≤180s，嵌套任务共享同一份预算。
  *
- * 安全：模型只能调用 [ToolRegistry] 里注册过的 34 个本地工具，没有任何执行代码 / Shell / 任意文件读写的通道；
+ * 能力发现（v1.9 Phase 1）：CHAT 域默认只下发「路由命中的能力 + 2 个元工具」（discover/load），
+ * 模型可调用 `load_capability` 在下一轮动态扩展工具集，因此工具总数 36（34 业务 + 2 元工具）。
+ *
+ * 安全：模型只能调用 [ToolRegistry] 里注册过的本地工具，没有任何执行代码 / Shell / 任意文件读写的通道；
  * 工具只返回聚合数据，不把原始 UsageEvents 明细发给模型。
  */
 class AgentLoop(
@@ -114,6 +120,7 @@ class AgentLoop(
             addAll(QuotaTools(settings, eventSource, usage).all)
             addAll(GuardTools(settings).all)
             addAll(ScoreTools().all)
+            addAll(CapabilityTools().all)
         },
     )
 
@@ -384,8 +391,28 @@ class AgentLoop(
                 llm = client
             }
 
-            // 模型只能看到当前任务域允许的工具（REPORT/BACKGROUND/INSIGHT 只剩只读）
-            val visibleSpecs = registry.specs(request.scope)
+            // 模型只能看到当前任务域允许的工具（REPORT/BACKGROUND/INSIGHT 只剩只读）。
+            // v1.9 Phase 1：CHAT 域按「已加载能力 + 元工具」动态下发 schema，避免 34 个工具一次性塞给模型。
+            val metaTools = CapabilityTools.META_TOOLS
+            val loadedCapabilities: MutableSet<String> =
+                if (request.scope == TaskScope.CHAT) {
+                    CapabilityDiscovery
+                        .initialCapabilities(request.prompt, request.context)
+                        .toMutableSet()
+                } else {
+                    mutableSetOf()
+                }
+            fun computeVisibleSpecs(): List<LlmToolSpec> =
+                if (request.scope == TaskScope.CHAT) {
+                    registry.specsForCapabilities(loadedCapabilities, request.scope, metaTools)
+                } else {
+                    registry.specs(request.scope)
+                }
+            var visibleSpecs: List<LlmToolSpec> = computeVisibleSpecs()
+            Log.i(
+                TAG,
+                "task tools: scope=${request.scope} caps=$loadedCapabilities tools=${visibleSpecs.size}/${registry.names.size}",
+            )
             // 取消后不再增量更新：onTextDelta 在回调线程里执行，需要自己检查任务 Job 是否还活着
             val taskJob = currentCoroutineContext()[Job]
 
@@ -512,8 +539,28 @@ class AgentLoop(
                         usedCalls = usedTools.size,
                         scope = request.scope,
                         timeoutMsOverride = budget.timeoutForRequest(TOOL_TIMEOUT_MS),
+                        // CHAT 域传入当前可见工具集合（能力加载后 visibleSpecs 已更新）；
+                        // 非 CHAT 域保持 null（所有 scope 允许的工具都可执行）。
+                        allowedToolNames = if (request.scope == TaskScope.CHAT) {
+                            visibleSpecs.map { it.name }.toSet()
+                        } else {
+                            null
+                        },
                     )
                     usedTools.add(call.name)
+                    // 能力加载：load_capability 返回 {loadedCapability: id}，下一轮把该能力的工具加入可见集合
+                    if (result.ok) {
+                        runCatching {
+                            val marker = org.json.JSONObject(result.output).optString("loadedCapability")
+                            if (marker.isNotBlank() && loadedCapabilities.add(marker)) {
+                                visibleSpecs = computeVisibleSpecs()
+                                Log.i(
+                                    TAG,
+                                    "capability loaded: $marker -> tools=${visibleSpecs.size} caps=$loadedCapabilities",
+                                )
+                            }
+                        }
+                    }
                     messages.add(LlmMessage.tool(result.callId, result.toolName, result.output))
                     emitToolFinished(call.name, call.id, result.ok, result.output, emitEvents)
                     if (result.ok && registry.find(call.name)?.kind?.let { it != ToolKind.QUERY } == true) {
@@ -920,6 +967,12 @@ class AgentLoop(
                白名单每天能加几个用 set_whitelist_daily_limit（草案，0=不限）；
                get_whitelist / get_quota_status 会返回今天还能加几个白名单。
 
+            11. 工具是按「能力」动态加载的：你当前只看到与用户目标相关的能力工具 + 两个元工具。
+               如果发现需要其他能力（例如用户突然问白名单、报告、专注时段），先调用 discover_capabilities
+               搜索能力，再调用 load_capability(capability_id) 加载；加载后**下一轮**才能调用这些工具。
+               不要臆造不存在的能力或工具名；也不要说「我做不到」而不先尝试 discover/load。
+               页面上下文（来源页面/当前应用）只用于定位对象，统计数字仍必须调用工具获取。
+
             今天的日期是 %TODAY%。
         """.trimIndent()
 
@@ -944,6 +997,12 @@ class AgentLoop(
             7. 报告涉及额度时（例如「建议把每日额度调到 X 分钟」「某个应用要设限额」），
                可以先调用 get_quota_status 读取真实额度与限额数据再写建议；不要编造额度数字。
             8. 需要更长周期趋势时用 get_usage_trend（days 1-30，只读）；数据不足时说明「更早数据不完整」，不要补零。
+
+            11. 工具是按「能力」动态加载的：你当前只看到与用户目标相关的能力工具 + 两个元工具。
+               如果发现需要其他能力（例如用户突然问白名单、报告、专注时段），先调用 discover_capabilities
+               搜索能力，再调用 load_capability(capability_id) 加载；加载后**下一轮**才能调用这些工具。
+               不要臆造不存在的能力或工具名；也不要说「我做不到」而不先尝试 discover/load。
+               页面上下文（来源页面/当前应用）只用于定位对象，统计数字仍必须调用工具获取。
 
             今天的日期是 %TODAY%。
         """.trimIndent()

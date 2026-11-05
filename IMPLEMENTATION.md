@@ -288,3 +288,24 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
 - `KeepAliveGuide`：忽略电池优化申请、vivo/小米/OPPO/华为 自启动页深链、应用详情、无障碍设置、adb 授权命令。
 - 设置页「守护保活」卡：三行状态 + 四个操作按钮 + 命令复制；无障碍关闭时红字提示。
 - 真机（vivo）：OEM 关闭无障碍后约 20 秒自动恢复；`am kill` 后进程与服务存活；Doze 白名单已加入。force-stop 无法自恢复（Android 限制），已如实说明。
+
+---
+
+## 十九、v1.9 Phase 1：动态能力发现（Capability Discovery）
+
+- 新增 `agent/capability/`：
+  - `CapabilityDescriptor`（id/名称/描述/分类/工具/示例/关键词）
+  - `CapabilityCatalog`：9 个能力覆盖 34 个业务工具（工具→能力唯一映射，单测保证无遗漏/无重复）
+  - `CapabilityDiscovery`：本地快速路由（关键词 + 页面上下文，命中不了回退常用能力），以及模型侧 discover 搜索
+- 新增元工具 `discover_capabilities` / `load_capability`（QUERY）：
+  - 模型可搜索能力、请求加载；`load_capability` 返回 `{loadedCapability}` 标记，AgentLoop 在**下一轮**扩展可见工具集
+- `ToolRegistry.specsForCapabilities(caps, scope, metaTools)`：按「已加载能力 + 元工具」下发 schema，仍受 TaskScope 过滤
+- `AgentLoop`：CHAT 域动态工具集（初始 = 路由命中能力 + 2 个元工具），加载后重算；日志记录 `task tools: caps=... tools=x/36`
+- **执行器能力门禁**：`ToolExecutor.execute(allowedToolNames)` —— 未加载能力的工具即使已注册也拒绝执行
+  （设备实测发现模型会凭历史工具名直接调用，仅靠"不下发 schema"不足以防住）
+- 提示词：CHAT_SYSTEM 新增规则 11（能力发现流程、不可臆造工具、先 discover/load 再调）
+- 测试：新增 `CapabilityCatalogTest`（4）、`CapabilityDiscoveryTest`（10），总计 **48 个单测全部通过**
+
+真机（vivo，versionCode 22）：
+- 「how many minutes today」→ `caps=[usage_analysis] tools=8/36`，模型仅调用 `get_daily_usage` + `get_usage_ranking`，回答「今天 19 分钟，剩余 341 分钟」
+- 能力目录、路由、权限过滤、门禁均有单测/代码路径覆盖；APK MD5 `9d5ba7d9122f952d27961ca4e01bb987`

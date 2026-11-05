@@ -1,5 +1,6 @@
 package com.aid.usageguard.agent.tools
 
+import com.aid.usageguard.agent.capability.CapabilityCatalog
 import com.aid.usageguard.agent.llm.LlmToolSpec
 
 /**
@@ -29,6 +30,21 @@ class ToolRegistry(tools: List<AgentTool>) {
     /** 按任务权限域过滤后的工具 schema（发给模型的就是这一份） */
     fun specs(scope: TaskScope): List<LlmToolSpec> =
         ToolScopePolicy.visible(tools, scope).map { tool -> tool.toSpec() }
+
+    /**
+     * 按「已加载能力 + 元工具」生成模型可见 schema（v1.9 Phase 1 动态能力发现）。
+     * 仍然受 TaskScope 过滤：REPORT/BACKGROUND/INSIGHT 里写工具不会因为加载能力而可见。
+     */
+    fun specsForCapabilities(
+        capabilities: Set<String>,
+        scope: TaskScope,
+        alwaysInclude: Set<String> = emptySet(),
+    ): List<LlmToolSpec> = tools
+        .filter { tool ->
+            ToolScopePolicy.allows(scope, tool.kind) &&
+                (tool.name in alwaysInclude || CapabilityCatalog.capabilityOf(tool.name) in capabilities)
+        }
+        .map { tool -> tool.toSpec() }
 
     /** 执行器用：该工具在当前任务域是否允许执行 */
     fun allows(toolName: String, scope: TaskScope): Boolean =

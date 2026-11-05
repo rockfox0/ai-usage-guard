@@ -55,6 +55,12 @@ class ToolExecutor(
         usedCalls: Int,
         scope: TaskScope = TaskScope.CHAT,
         timeoutMsOverride: Long? = null,
+        /**
+         * 当前任务已加载/可见的工具名（v1.9 Phase 1 能力门禁）。
+         * 非 null 时，未加载能力的工具即使已注册也会被拒绝执行；
+         * 仅靠「不下发 schema」不足以防模型凭历史工具名直接调用。
+         */
+        allowedToolNames: Set<String>? = null,
     ): ToolExecution {
         val started = System.currentTimeMillis()
         val effectiveTimeout = (timeoutMsOverride ?: timeoutMs).coerceAtLeast(1L)
@@ -73,6 +79,15 @@ class ToolExecutor(
                 started,
                 "工具「${call.name}」不在白名单内。可用工具：" + registry.names.joinToString("、"),
             )
+
+        // 能力门禁：CHAT 域只允许「已加载能力 + 元工具」里的工具，防止模型绕过 schema 直接调
+        if (allowedToolNames != null && call.name !in allowedToolNames) {
+            return failure(
+                call,
+                started,
+                "工具「${call.name}」所属能力尚未加载。请先调用 discover_capabilities 搜索、load_capability 加载后再调用。",
+            )
+        }
 
         // 任务权限：执行器独立拦截；报告/后台即使模型硬编调用也会被拒绝
         if (!ToolScopePolicy.allows(scope, tool.kind)) {
