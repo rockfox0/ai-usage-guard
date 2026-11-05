@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AI 使用管家</string>
+    <string name="service_label">AI 使用管家 · 应用暂停守护</string>
+    <string name="accessibility_desc">用于识别当前打开的应用。当你在本应用中把某个 App 设为「暂停」后，一旦打开它就会被立即拦截并提示返回，从而强制中断使用。</string>
+</resources>

@@ -1,0 +1,28 @@
+# Gradle / build
+.gradle/
+build/
+*/build/
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE
+.idea/
+*.iml
+*.hprof
+
+# Local config
+local.properties
+*.jks
+*.keystore
+
+# APK / 产物
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# OS
+.DS_Store
+Thumbs.db
