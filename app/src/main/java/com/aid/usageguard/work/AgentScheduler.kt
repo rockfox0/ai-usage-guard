@@ -75,6 +75,11 @@ object AgentScheduler {
 
             // 1) 使用数据同步：30 分钟一次
             workManager.enqueueUniquePeriodicWork(
+                GuardWatchdogWorker.UNIQUE_NAME,
+                ExistingPeriodicWorkPolicy.KEEP,
+                PeriodicWorkRequestBuilder<GuardWatchdogWorker>(15, TimeUnit.MINUTES).build(),
+            )
+            workManager.enqueueUniquePeriodicWork(
                 UNIQUE_SYNC,
                 ExistingPeriodicWorkPolicy.KEEP,
                 syncRequest(),

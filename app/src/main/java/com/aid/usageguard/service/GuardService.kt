@@ -129,6 +129,8 @@ class GuardService : AccessibilityService() {
         super.onServiceConnected()
         Log.i(TAG, "onServiceConnected")
         runCatching { Container.init(this) }
+        // 保活：无障碍连上后拉起常驻通知服务（v1.8.3）
+        runCatching { KeepAliveService.start(this) }
         scope.launch {
             runCatching {
                 // 桌面启动器 + 输入法永远不能限制，否则用户无法回到桌面/打字

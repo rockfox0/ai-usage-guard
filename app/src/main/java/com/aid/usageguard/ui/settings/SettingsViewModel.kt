@@ -11,6 +11,8 @@ import com.aid.usageguard.data.repo.WhitelistRepository
 import com.aid.usageguard.data.settings.AppSettings
 import com.aid.usageguard.domain.quota.FocusWindow
 import com.aid.usageguard.restriction.RestrictionMode
+import com.aid.usageguard.service.AccessibilityRestorer
+import com.aid.usageguard.service.KeepAliveGuide
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -40,6 +42,9 @@ class SettingsViewModel(
     /** 白名单每日添加额度（今日已添加 / 剩余；null = 尚未读取） */
     val whitelistQuota = MutableStateFlow<WhitelistRepository.Quota?>(null)
 
+    /** 守护保活状态（v1.8.3） */
+    val keepAlive = MutableStateFlow(KeepAliveState())
+
     fun refreshPermissions() {
         val context = getApplication<Application>()
         permissionState.value = PermissionState(
@@ -56,6 +61,42 @@ class SettingsViewModel(
             quotaUsedMinutes.value = snapshot?.totalMinutes
         }
     }
+
+    /** 读取守护保活相关状态：无障碍 / 自恢复授权 / 电池优化白名单 */
+    fun refreshKeepAlive() {
+        val context = getApplication<Application>()
+        keepAlive.value = KeepAliveState(
+            accessibilityOn = accessSafe(context) { AccessibilityRestorer.isEnabled(context) },
+            writePermission = accessSafe(context) { AccessibilityRestorer.hasWritePermission(context) },
+            ignoringBatteryOptimizations = accessSafe(context) {
+                KeepAliveGuide.isIgnoringBatteryOptimizations(context)
+            },
+        )
+    }
+
+    /** 申请忽略电池优化（系统确认框） */
+    fun requestIgnoreBatteryOptimizations() {
+        val context = getApplication<Application>()
+        runCatching { KeepAliveGuide.requestIgnoreBatteryOptimizations(context) }
+        refreshKeepAlive()
+    }
+
+    /** 打开自启动 / 后台运行设置（vivo 优先，其它厂商回退应用详情） */
+    fun openAutoStartSettings() {
+        val context = getApplication<Application>()
+        runCatching { KeepAliveGuide.openAutoStartSettings(context) }
+        refreshKeepAlive()
+    }
+
+    /** 打开系统无障碍设置 */
+    fun openKeepAliveAccessibilitySettings() {
+        val context = getApplication<Application>()
+        runCatching { KeepAliveGuide.openAccessibilitySettings(context) }
+        refreshKeepAlive()
+    }
+
+    /** 授予自恢复权限（WRITE_SECURE_SETTINGS）的一次性 adb 命令 */
+    fun adbGrantCommand(): String = KeepAliveGuide.adbGrantCommand()
 
     /** 读取白名单添加额度（今日已添加 / 还可添加） */
     fun refreshWhitelistQuota() {
@@ -203,4 +244,11 @@ data class PermissionState(
     val hasUsageAccess: Boolean = false,
     val accessibilityOn: Boolean = false,
     val notificationsEnabled: Boolean = false,
+)
+
+/** 守护保活状态（v1.8.3）：无障碍是否在跑 / 是否可自恢复 / 是否已被系统加白 */
+data class KeepAliveState(
+    val accessibilityOn: Boolean = false,
+    val writePermission: Boolean = false,
+    val ignoringBatteryOptimizations: Boolean = false,
 )

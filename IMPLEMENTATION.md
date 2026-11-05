@@ -277,3 +277,14 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
 - **白名单每日上限**：`WhitelistRepository`（默认每天 1 个，跨天重置，移出不计次），所有写入口（UI、ActionExecutor、AI 草案）统一走它；`set_whitelist_daily_limit` 草案工具。
 - **专注时段**：`FocusWindow`（支持跨午夜）+ `QuotaReason.FOCUS_WINDOW`，GuardService 实时拦截并显示专用浮层；`set_focus_window` 草案工具；设置/列表/详情/首页均有状态展示。
 - 真机（vivo）：专注时段拦截与白名单放行、白名单第 2 个添加被拒（开关回滚）、34 单测通过。
+
+---
+
+## 十八、v1.8.3：守护保活（被清后台后自动恢复）
+
+- `KeepAliveService`：前台常驻通知（`guard_alive`）+ `START_STICKY`，每 60 秒检查无障碍开关。
+- `AccessibilityRestorer`：检测/写回 `enabled_accessibility_services` 与 `accessibility_enabled`（需一次性 adb 授予 `WRITE_SECURE_SETTINGS`）；失败时通知用户手动开启（30 分钟节流）。
+- `GuardWatchdogWorker`：WorkManager 每 15 分钟兜底；`BootReceiver`：开机/更新后恢复并拉起服务。
+- `KeepAliveGuide`：忽略电池优化申请、vivo/小米/OPPO/华为 自启动页深链、应用详情、无障碍设置、adb 授权命令。
+- 设置页「守护保活」卡：三行状态 + 四个操作按钮 + 命令复制；无障碍关闭时红字提示。
+- 真机（vivo）：OEM 关闭无障碍后约 20 秒自动恢复；`am kill` 后进程与服务存活；Doze 白名单已加入。force-stop 无法自恢复（Android 限制），已如实说明。

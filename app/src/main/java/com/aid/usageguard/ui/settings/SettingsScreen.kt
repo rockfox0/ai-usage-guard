@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -45,12 +46,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aid.usageguard.data.settings.AppSettings
@@ -60,6 +66,7 @@ import com.aid.usageguard.restriction.RestrictionMode
 import com.aid.usageguard.ui.actions.PendingActionsCard
 import com.aid.usageguard.notify.NotificationHelper
 import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.aid.usageguard.ui.vmFactory
 import kotlin.math.roundToInt
@@ -73,9 +80,19 @@ fun SettingsScreen() {
     val message by vm.message.collectAsStateWithLifecycle()
     val quotaUsed by vm.quotaUsedMinutes.collectAsStateWithLifecycle()
     val whitelistQuota by vm.whitelistQuota.collectAsStateWithLifecycle()
+    val keepAlive by vm.keepAlive.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) {
         vm.refreshPermissions()
+        vm.refreshQuotaUsage()
+        vm.refreshWhitelistQuota()
+        vm.refreshKeepAlive()
+    }
+
+    // 从系统/厂商页面（无障碍、电池优化、自启动）返回后重新读取状态
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        vm.refreshPermissions()
+        vm.refreshKeepAlive()
         vm.refreshQuotaUsage()
         vm.refreshWhitelistQuota()
     }
@@ -188,6 +205,105 @@ fun SettingsScreen() {
                     "Android 不允许应用自己授予以上权限，必须由你在系统界面确认一次。",
                     fontSize = 10.sp,
                     color = colors.onSurfaceVariant,
+                )
+            }
+        }
+
+        // 守护保活（v1.8.3）：前台常驻 + 无障碍自恢复 + 电池/自启动白名单
+        item {
+            SettingsCard(title = "守护保活") {
+                val clipboard = LocalClipboardManager.current
+                val adbCommand = remember { vm.adbGrantCommand() }
+                var copied by remember { mutableStateOf(false) }
+                LaunchedEffect(copied) {
+                    if (copied) {
+                        delay(2_500L)
+                        copied = false
+                    }
+                }
+
+                if (!keepAlive.accessibilityOn) {
+                    Text(
+                        text = "守护当前未运行，限制功能已失效",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = colors.error,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                }
+                StatusLine(
+                    label = "无障碍服务",
+                    ok = keepAlive.accessibilityOn,
+                    okText = "开启",
+                    badText = "已关闭",
+                )
+                Spacer(Modifier.height(4.dp))
+                StatusLine(
+                    label = "自恢复授权（adb）",
+                    ok = keepAlive.writePermission,
+                    okText = "已授权",
+                    badText = "未授权",
+                )
+                Spacer(Modifier.height(4.dp))
+                StatusLine(
+                    label = "电池优化",
+                    ok = keepAlive.ignoringBatteryOptimizations,
+                    okText = "已加入白名单",
+                    badText = "未加入",
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    TextButton(onClick = { vm.requestIgnoreBatteryOptimizations() }) {
+                        Text("申请忽略电池优化", fontSize = 12.sp)
+                    }
+                    TextButton(onClick = { vm.openAutoStartSettings() }) {
+                        Text("打开自启动/后台设置", fontSize = 12.sp)
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    TextButton(onClick = { vm.openKeepAliveAccessibilitySettings() }) {
+                        Text("打开无障碍设置", fontSize = 12.sp)
+                    }
+                    TextButton(
+                        onClick = {
+                            clipboard.setText(AnnotatedString(adbCommand))
+                            copied = true
+                        },
+                    ) {
+                        Text("复制自恢复授权命令", fontSize = 12.sp)
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "一次性 adb 授权命令（电脑连上手机后执行，仅需一次）：",
+                    fontSize = 10.sp,
+                    color = colors.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(2.dp))
+                SelectionContainer {
+                    Text(
+                        text = adbCommand,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = colors.primary,
+                        lineHeight = 15.sp,
+                    )
+                }
+                if (copied) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "已复制到剪贴板",
+                        fontSize = 10.sp,
+                        color = colors.primary,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Android 不允许应用强制常驻；本页用于尽量保持守护运行：" +
+                        "前台常驻通知 + 无障碍被关闭后自动恢复（需一次性 adb 授权）+ 电池/自启动白名单。",
+                    fontSize = 11.sp,
+                    color = colors.onSurfaceVariant,
+                    lineHeight = 17.sp,
                 )
             }
         }
@@ -777,6 +893,20 @@ private fun SettingsCard(title: String, content: @Composable () -> Unit) {
             Spacer(Modifier.height(10.dp))
             content()
         }
+    }
+}
+
+/** 只读状态行：`● 开启` / `● 已关闭`（用于守护保活卡） */
+@Composable
+private fun StatusLine(label: String, ok: Boolean, okText: String, badText: String) {
+    val colors = MaterialTheme.colorScheme
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        Text(
+            text = "● ${if (ok) okText else badText}",
+            fontSize = 11.sp,
+            color = if (ok) colors.primary else colors.error,
+        )
     }
 }
 
