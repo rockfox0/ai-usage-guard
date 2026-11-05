@@ -309,3 +309,22 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
 真机（vivo，versionCode 22）：
 - 「how many minutes today」→ `caps=[usage_analysis] tools=8/36`，模型仅调用 `get_daily_usage` + `get_usage_ranking`，回答「今天 19 分钟，剩余 341 分钟」
 - 能力目录、路由、权限过滤、门禁均有单测/代码路径覆盖；APK MD5 `9d5ba7d9122f952d27961ca4e01bb987`
+
+---
+
+## 二十、v1.9 Phase 2：动态任务规划 + 结果评估
+
+- 新增 `agent/plan/`：
+  - `TaskMode` + `TaskModeClassifier`：本地零 token 判定 DIRECT / ANALYSIS / GOAL（简单问题保持直答，不额外消耗模型请求）
+  - `TaskPlan` / `TaskStep` / `StepStatus`：目标、步骤（能力、是否需要数据）、完成条件、是否需要确认
+  - `TaskPlanner`：一次模型请求产出 JSON 计划；`parse` 为纯函数（去围栏、≤5 步、能力 id 必须存在、空计划/非法 JSON 返回 null → 回退 DIRECT），`directive` 把计划注入主循环
+  - `ResultEvaluator`：本地规则评估（空回答 / 分析任务没调数据工具 / 结论无数字 / 30 天请求但有效数据不足），返回 OK / NEED_MORE（最多补一轮）/ INSUFFICIENT_DATA（追加"数据不完整"说明）
+- `AgentLoop` 集成：
+  - CHAT 域先按模式判定；ANALYSIS/GOAL 先规划（消耗 1 次模型请求），计划能力一次性预加载后再进入工具循环
+  - 记录每次工具输出；模型想结束时先评估，NEED_MORE 时注入「结果评估」指令并补一轮（每次任务最多一次）
+  - 任务结束对 30 天/月维度请求检查数据覆盖，不足则追加说明（不补零、不假装完整）
+  - 预算仍为 6 请求 / 12 工具 / 180s，规划与补轮都计入
+- 测试：新增 `TaskModeClassifierTest`(5)、`TaskPlannerTest`(6)、`ResultEvaluatorTest`(7)，总计 **66 个单测全部通过**
+  （为在 JVM 单测里解析 JSON，新增 test 依赖 `org.json:json`）
+
+真机：APK 已安装（versionCode 23）。设备当时锁屏/被占用，Phase 2 的规划/评估链路真机回归未完成，留待下轮设备空闲时补测（Case 2/4）。MD5 `bd98aac80109390a44a6fac7786847f7`

@@ -17,6 +17,12 @@ import com.aid.usageguard.agent.llm.LlmToolSpec
 import com.aid.usageguard.agent.llm.LlmStreamUnavailableException
 import com.aid.usageguard.agent.llm.normalizeApiBase
 import com.aid.usageguard.agent.memory.AgentMemory
+import com.aid.usageguard.agent.plan.EvaluationVerdict
+import com.aid.usageguard.agent.plan.ResultEvaluator
+import com.aid.usageguard.agent.plan.TaskMode
+import com.aid.usageguard.agent.plan.TaskModeClassifier
+import com.aid.usageguard.agent.plan.TaskPlan
+import com.aid.usageguard.agent.plan.TaskPlanner
 import com.aid.usageguard.agent.tools.BehaviorTools
 import com.aid.usageguard.agent.tools.CapabilityTools
 import com.aid.usageguard.agent.tools.ControlTools
@@ -413,6 +419,68 @@ class AgentLoop(
                 TAG,
                 "task tools: scope=${request.scope} caps=$loadedCapabilities tools=${visibleSpecs.size}/${registry.names.size}",
             )
+
+            /** 预算停止原因（规划阶段也可能因预算不足而停止） */
+            var budgetStop: String? = null
+            /** 本任务是否已执行过副作用（草案 / 本地报告 / 通知）：只有无副作用时才允许流式降级 */
+            var sideEffectsPerformed = false
+
+            // ---- v1.9 Phase 2：复杂任务先规划（一次模型请求产出 JSON 计划） ----
+            val expectsMonthRange = request.prompt.contains("30 天") || request.prompt.contains("30天") ||
+                request.prompt.contains("一个月") || request.prompt.contains("这个月") ||
+                request.prompt.lowercase().contains("month")
+            val mode = if (request.scope == TaskScope.CHAT) {
+                TaskModeClassifier.classify(request.prompt, request.context)
+            } else {
+                TaskMode.DIRECT
+            }
+            var plan: TaskPlan? = null
+            var replanned = false
+            if (request.scope == TaskScope.CHAT && mode != TaskMode.DIRECT) {
+                val planStop = budget.tryConsumeModelRequest()
+                if (planStop != null) {
+                    budgetStop = planStop
+                } else {
+                    val parsed = runCatching {
+                        val plannerResp = llm.complete(
+                            system = TaskPlanner.systemPrompt(),
+                            messages = listOf(
+                                LlmMessage.user(
+                                    TaskPlanner.userPrompt(request.prompt, request.context),
+                                ),
+                            ),
+                            tools = emptyList(),
+                        )
+                        TaskPlanner.parse(plannerResp.text, mode)
+                    }.getOrNull()
+                    if (parsed != null) {
+                        plan = parsed
+                        // 预加载计划所需能力（只加载目录里存在的，scope 过滤仍由 specsForCapabilities 保证）
+                        parsed.steps.flatMap { it.capabilities }.forEach { loadedCapabilities.add(it) }
+                        visibleSpecs = computeVisibleSpecs()
+                        messages.add(LlmMessage.user(TaskPlanner.directive(parsed)))
+                        Log.i(
+                            TAG,
+                            "planned mode=$mode steps=${parsed.steps.size} caps=${parsed.steps.flatMap { it.capabilities }.distinct()} tools=${visibleSpecs.size}",
+                        )
+                    } else {
+                        Log.w(TAG, "planning failed, fallback to DIRECT loop")
+                    }
+                }
+            }
+            // 数据覆盖（结果评估用；失败不影响主流程）
+            val coverage = if (expectsMonthRange) {
+                runCatching {
+                    usage.coverage(
+                        UsageEventSource.dateOf(System.currentTimeMillis() - 29L * 24 * 60 * 60 * 1000),
+                        UsageEventSource.todayDate(),
+                    )
+                }.getOrNull()
+            } else {
+                null
+            }
+            // 本次任务所有工具输出（结果评估用：判断是否真的补到了数据）
+            val toolOutputs = LinkedHashMap<String, String>()
             // 取消后不再增量更新：onTextDelta 在回调线程里执行，需要自己检查任务 Job 是否还活着
             val taskJob = currentCoroutineContext()[Job]
 
@@ -420,9 +488,6 @@ class AgentLoop(
             var finalText = ""
             var finalOk = false
             var nudged = false
-            var budgetStop: String? = null
-            /** 本任务是否已执行过副作用（草案 / 本地报告 / 通知）：只有无副作用时才允许流式降级 */
-            var sideEffectsPerformed = false
 
             /** 一次流式模型请求（含超时与增量回调） */
             suspend fun streamOnce(): LlmResponse =
@@ -494,6 +559,27 @@ class AgentLoop(
                 if (response.text.isNotBlank()) finalText = response.text
 
                 if (!response.wantsTools) {
+                    // v1.9 Phase 2：结果评估 —— 工具成功 ≠ 任务完成；数据不足时补一轮（每次任务最多一次）
+                    if (plan != null && !replanned) {
+                        val evaluation = ResultEvaluator.evaluate(
+                            text = response.text,
+                            usedTools = usedTools.distinct(),
+                            plan = plan,
+                            coverage = coverage,
+                            expectsMonthRange = expectsMonthRange,
+                        )
+                        if (evaluation.verdict == EvaluationVerdict.NEED_MORE) {
+                            replanned = true
+                            messages.add(LlmMessage.assistant(response.text))
+                            messages.add(
+                                LlmMessage.user(
+                                    "【结果评估】${evaluation.reason}。${evaluation.directive}",
+                                ),
+                            )
+                            Log.i(TAG, "evaluation NEED_MORE: ${evaluation.reason}")
+                            continue
+                        }
+                    }
                     // 报告模式工具调用不足 / 想直接编数据：明确要求一次，再给一轮机会
                     if (request.requireToolUse && usedTools.distinct().size < MIN_TOOLS_FOR_REPORT && !nudged) {
                         nudged = true
@@ -548,6 +634,7 @@ class AgentLoop(
                         },
                     )
                     usedTools.add(call.name)
+                    toolOutputs[call.name] = result.output
                     // 能力加载：load_capability 返回 {loadedCapability: id}，下一轮把该能力的工具加入可见集合
                     if (result.ok) {
                         runCatching {
@@ -577,6 +664,23 @@ class AgentLoop(
             }
 
             var text = finalText.trim()
+            // v1.9 Phase 2：数据不完整时明确告知，而不是让模型"补零"给结论
+            if (plan != null && text.isNotBlank()) {
+                runCatching {
+                    val evaluation = ResultEvaluator.evaluate(
+                        text = text,
+                        usedTools = usedTools.distinct(),
+                        plan = plan,
+                        coverage = coverage,
+                        expectsMonthRange = expectsMonthRange,
+                    )
+                    if (evaluation.verdict == EvaluationVerdict.INSUFFICIENT_DATA &&
+                        evaluation.caveat.isNotBlank() && !text.contains(evaluation.caveat)
+                    ) {
+                        text = "$text\n\n${evaluation.caveat}"
+                    }
+                }
+            }
             val budgetReason = budgetStop
             val budgetExhausted = budgetReason != null
             if (budgetReason != null) {

@@ -158,6 +158,7 @@ adb shell settings put secure accessibility_enabled 1
 | v1.8.2 | 30 天数据与趋势工具、更宽 Agent 上下文（24 条历史 + 本地数据快照 + 工具描述精简）、白名单每日添加上限、专注时段只允许白名单 |
 | v1.8.3 | 守护保活：前台常驻服务、无障碍自恢复（adb 一次性授权）、WorkManager 看门狗、开机自启、保活引导卡 |
 | v1.9 Phase 1 | 动态能力发现：9 个能力目录覆盖 34 个工具、本地路由 + `discover_capabilities`/`load_capability` 元工具、执行器能力门禁（CHAT 首轮工具从 36 → 8） |
+| v1.9 Phase 2 | 动态任务规划 + 结果评估：Direct/Analysis/Goal 模式、一次请求产出 JSON 计划、结果不足补一轮、30 天数据不足明确告知（66 单测） |
 
 详细实现说明见 [IMPLEMENTATION.md](IMPLEMENTATION.md)，各版本真机验收报告见 [docs/reports/](docs/reports/)，
 需求原文见 [docs/spec.md](docs/spec.md)。

@@ -13,7 +13,7 @@ android {
         applicationId = "com.aid.usageguard"
         minSdk = 26
         targetSdk = 35
-        versionCode = 22
+        versionCode = 23
         versionName = "1.7"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -82,5 +82,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     testImplementation("junit:junit:4.13.2")
+    // JVM 单测里 android.jar 的 org.json 是 stub，替换为真实实现（仅 test 类路径）
+    testImplementation("org.json:json:20240303")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
 }
