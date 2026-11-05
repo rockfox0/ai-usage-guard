@@ -78,6 +78,7 @@ class ActionExecutor(
                     p.optBooleanOrNull("daily_reminder")?.let { settings.setNotifyDailyReminder(it) }
                     p.optBooleanOrNull("goal_exceeded")?.let { settings.setNotifyGoalExceeded(it) }
                     p.optBooleanOrNull("anomaly")?.let { settings.setNotifyAnomaly(it) }
+                    p.optBooleanOrNull("proactive")?.let { settings.setNotifyProactive(it) }
                     p.optBooleanOrNull("daily_summary")?.let { settings.setNotifyDailySummary(it) }
                     p.optBooleanOrNull("weekly_summary")?.let { settings.setNotifyWeeklySummary(it) }
                     Result(true, "通知渠道设置已更新")

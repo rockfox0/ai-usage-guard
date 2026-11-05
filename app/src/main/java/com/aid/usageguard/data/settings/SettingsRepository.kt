@@ -33,6 +33,8 @@ data class AppSettings(
     val notifyDailyReminder: Boolean = true,
     val notifyGoalExceeded: Boolean = true,
     val notifyAnomaly: Boolean = true,
+    /** v1.9 Phase 6：主动洞察独立开关（与异常提醒分开，用户可只关主动分析） */
+    val notifyProactive: Boolean = true,
     val notifyDailySummary: Boolean = true,
     val notifyWeeklySummary: Boolean = true,
     val themeMode: String = THEME_SYSTEM,
@@ -123,6 +125,7 @@ class SettingsRepository(private val context: Context) {
         val NOTIFY_DAILY_REMINDER = booleanPreferencesKey("notify_daily_reminder")
         val NOTIFY_GOAL_EXCEEDED = booleanPreferencesKey("notify_goal_exceeded")
         val NOTIFY_ANOMALY = booleanPreferencesKey("notify_anomaly")
+        val NOTIFY_PROACTIVE = booleanPreferencesKey("notify_proactive")
         val NOTIFY_DAILY_SUMMARY = booleanPreferencesKey("notify_daily_summary")
         val NOTIFY_WEEKLY_SUMMARY = booleanPreferencesKey("notify_weekly_summary")
         val THEME_MODE = stringPreferencesKey("theme_mode")
@@ -163,6 +166,7 @@ class SettingsRepository(private val context: Context) {
             notifyDailyReminder = prefs[Keys.NOTIFY_DAILY_REMINDER] ?: defaults.notifyDailyReminder,
             notifyGoalExceeded = prefs[Keys.NOTIFY_GOAL_EXCEEDED] ?: defaults.notifyGoalExceeded,
             notifyAnomaly = prefs[Keys.NOTIFY_ANOMALY] ?: defaults.notifyAnomaly,
+            notifyProactive = prefs[Keys.NOTIFY_PROACTIVE] ?: defaults.notifyProactive,
             notifyDailySummary = prefs[Keys.NOTIFY_DAILY_SUMMARY] ?: defaults.notifyDailySummary,
             notifyWeeklySummary = prefs[Keys.NOTIFY_WEEKLY_SUMMARY] ?: defaults.notifyWeeklySummary,
             themeMode = prefs[Keys.THEME_MODE] ?: defaults.themeMode,
@@ -224,6 +228,11 @@ class SettingsRepository(private val context: Context) {
     suspend fun setNotifyGoalExceeded(enabled: Boolean) = edit { it[Keys.NOTIFY_GOAL_EXCEEDED] = enabled }
 
     suspend fun setNotifyAnomaly(enabled: Boolean) = edit { it[Keys.NOTIFY_ANOMALY] = enabled }
+
+    suspend fun setNotifyProactive(enabled: Boolean) = edit { it[Keys.NOTIFY_PROACTIVE] = enabled }
+
+    /** v1.9 Phase 7：规划/子 Agent/报告用的模型（空 = 与默认模型相同） */
+    suspend fun setAiPlannerModel(model: String) = edit { it[Keys.AI_PLANNER_MODEL] = model.trim() }
 
     suspend fun setNotifyDailySummary(enabled: Boolean) = edit { it[Keys.NOTIFY_DAILY_SUMMARY] = enabled }
 

@@ -273,7 +273,7 @@ class ControlTools(
         override val name: String = "set_notification_channels"
         override val kind: ToolKind = ToolKind.PROPOSE
         override val description: String =
-            "生成通知渠道草案：daily_reminder/goal_exceeded/anomaly/daily_summary/weekly_summary，只改传入项。"
+            "生成通知渠道草案：daily_reminder/goal_exceeded/anomaly/proactive/daily_summary/weekly_summary，只改传入项。"
 
 
         override val parameters: JSONObject = JsonSchema.objectSchema(
@@ -281,6 +281,7 @@ class ControlTools(
                 "daily_reminder" to JsonSchema.boolean("每日使用提醒，可选"),
                 "goal_exceeded" to JsonSchema.boolean("超出每日目标的提醒，可选"),
                 "anomaly" to JsonSchema.boolean("异常使用提醒，可选"),
+                "proactive" to JsonSchema.boolean("主动洞察提醒（AI 主动发现使用变化），可选"),
                 "daily_summary" to JsonSchema.boolean("每日报告摘要，可选"),
                 "weekly_summary" to JsonSchema.boolean("每周报告摘要，可选"),
             ),
@@ -980,6 +981,7 @@ class ControlTools(
         "daily_reminder" -> prefs.notifyDailyReminder
         "goal_exceeded" -> prefs.notifyGoalExceeded
         "anomaly" -> prefs.notifyAnomaly
+        "proactive" -> prefs.notifyProactive
         "daily_summary" -> prefs.notifyDailySummary
         "weekly_summary" -> prefs.notifyWeeklySummary
         else -> false
@@ -989,6 +991,7 @@ class ControlTools(
         "daily_reminder" -> "每日提醒"
         "goal_exceeded" -> "超目标提醒"
         "anomaly" -> "异常提醒"
+        "proactive" -> "主动洞察"
         "daily_summary" -> "日报摘要"
         "weekly_summary" -> "周报摘要"
         else -> key
@@ -1014,6 +1017,7 @@ private val CHANNEL_KEYS = listOf(
     "daily_reminder",
     "goal_exceeded",
     "anomaly",
+    "proactive",
     "daily_summary",
     "weekly_summary",
 )

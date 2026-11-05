@@ -51,6 +51,9 @@ class SettingsViewModel(
     /** 我的监控（v1.9 Phase 5：本地引擎每 15 分钟检查的自定义规则） */
     val monitors = MutableStateFlow(MonitorsState())
 
+    /** AI 主动洞察（v1.9 Phase 6：每天最多 1 条） */
+    val insights = MutableStateFlow(InsightsState())
+
     fun refreshPermissions() {
         val context = getApplication<Application>()
         permissionState.value = PermissionState(
@@ -148,6 +151,40 @@ class SettingsViewModel(
             runCatching { Container.monitors.delete(id) }
             message.value = "已删除该监控规则"
             refreshMonitors()
+        }
+    }
+
+    /** 加载最近 AI 洞察（最多 5 条，runCatching 兜底） */
+    fun refreshInsights() {
+        viewModelScope.launch {
+            val list = runCatching { Container.insights.recent(5) }.getOrDefault(emptyList())
+            val items = list.take(5).map { insight ->
+                InsightUi(
+                    id = insight.id,
+                    title = insight.title,
+                    dateLabel = insight.date.takeLast(5),
+                    detail = insight.detail,
+                    suggestion = insight.suggestion,
+                )
+            }
+            insights.value = InsightsState(loading = false, items = items)
+        }
+    }
+
+    /** 主动分析开关（v1.9 Phase 6） */
+    fun setNotifyProactive(enabled: Boolean) {
+        viewModelScope.launch {
+            runCatching { settingsRepo.setNotifyProactive(enabled) }
+            message.value = if (enabled) "已开启主动分析" else "已关闭主动分析：后台不再生成洞察"
+            refreshInsights()
+        }
+    }
+
+    /** 规划模型（可选，v1.9 Phase 7）：留空表示与默认模型相同 */
+    fun saveAiPlannerModel(model: String) {
+        viewModelScope.launch {
+            runCatching { settingsRepo.setAiPlannerModel(model.trim()) }
+            message.value = "规划模型已保存"
         }
     }
 
@@ -297,6 +334,21 @@ data class PermissionState(
     val hasUsageAccess: Boolean = false,
     val accessibilityOn: Boolean = false,
     val notificationsEnabled: Boolean = false,
+)
+
+/** AI 洞察展示模型 */
+data class InsightUi(
+    val id: String,
+    val title: String,
+    /** 形如 11-06 */
+    val dateLabel: String,
+    val detail: String,
+    val suggestion: String,
+)
+
+data class InsightsState(
+    val loading: Boolean = true,
+    val items: List<InsightUi> = emptyList(),
 )
 
 /** 监控规则展示模型（name + describe 文案 + 启用状态） */

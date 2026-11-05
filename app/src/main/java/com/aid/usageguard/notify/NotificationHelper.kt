@@ -199,7 +199,7 @@ object NotificationHelper {
         settings: AppSettings? = null,
     ): Boolean {
         val cfg = settingsOf(settings)
-        if (!cfg.notificationEnabled || !cfg.notifyAnomaly) return false
+        if (!cfg.notificationEnabled || !cfg.notifyProactive) return false
         if (!canNotify(context)) return false
         val body = buildString {
             append(insight.detail)

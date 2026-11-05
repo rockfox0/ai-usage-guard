@@ -36,6 +36,12 @@
 - 修复：计划步数上限 5→3；预算剩余 <3 次不规划；预加载排除 `report` 能力；预算耗尽且无正文时用已执行工具结果组装部分结论。
 - 修复后单测 66 通过；真机重测待设备空闲（安装需 vivo 确认弹窗）。
 
+## 收尾补充（v34）
+
+- 主动分析独立开关 `notify_proactive`（ProactiveAgent / 通知 / 工具 / 草案卡全链路）
+- 设置页「AI 洞察」卡（开关 + 最近 5 条 + 空态）与「模型路由」卡（`ai_planner_model` 可视化配置）
+- `SettingsRepository.setAiPlannerModel` 补齐；125 单测通过；APK v34 已装 Pixel
+
 ## 已知缺口（随阶段补齐）
 
 - Phase 2 的步骤级状态（StepStarted/StepFinished）尚未通过 AgentEvent 暴露给 UI；当前计划以日志 + 注入指令体现。

@@ -35,7 +35,7 @@ class ProactiveAgent(
 
     suspend fun maybeGenerate(now: Long = System.currentTimeMillis()): ProactiveInsight? {
         val cfg = runCatching { settings.current() }.getOrNull() ?: return null
-        if (!cfg.notificationEnabled || !cfg.notifyAnomaly) return null
+        if (!cfg.notificationEnabled || !cfg.notifyProactive) return null
 
         val today = UsageEventSource.dateOf(now)
         if (runCatching { insights.countForDate(today) }.getOrDefault(0) > 0) return null

@@ -503,3 +503,24 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
 - 用于真机验收绕过 15/60 分钟周期等待。
 
 未完成（需要解锁设备 + 配置 AI Key）：设置页两张卡片截图、结构化回复、监控创建 UI、Phase 2/3 对话回归。
+
+---
+
+## 二十七、v1.9 收尾：主动分析独立开关 + 洞察/模型路由 UI（v34）
+
+### 数据层
+- `AppSettings.notifyProactive`（DataStore `notify_proactive`，默认 true）+ `setNotifyProactive()`：
+  **主动分析独立开关**（与「异常提醒」解耦，用户可只关主动洞察）。
+- `ProactiveAgent` 与 `NotificationHelper.notifyProactiveInsight` 改用该开关。
+- `set_notification_channels` 工具与 `ActionExecutor` 增加 `proactive` 渠道；`PendingActionUi` 同步「主动洞察」标签。
+- `SettingsRepository.setAiPlannerModel()` 补齐（规划模型可持久化）。
+
+### UI（设置页）
+- **「AI 洞察」卡**（我的监控之后）：主动分析 Switch、说明「每天最多 1 条 / 关闭后不再分析」、
+  最近 5 条洞察（标题+日期+detail+建议）、空态文案；进入/返回自动刷新。
+- **「模型路由（可选）」卡**（AI 接口之后）：规划模型输入框（留空=与默认模型相同）、保存提示、说明
+  「用于规划/复杂分析/报告；日常问答仍用默认模型」。
+- 设置页顺序：权限状态 → 守护保活 → 我的监控 → AI 洞察 → 限制模式… → AI 接口 → 模型路由 → AI 个性化。
+
+### 验证
+- 编译通过；**125 单测全部通过**；APK versionCode 34，MD5 `dd559038a22905503ecb6ae6eb6d237a`，已安装到 Pixel 6（锁屏状态，UI 截图待解锁）。

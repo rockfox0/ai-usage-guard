@@ -226,6 +226,7 @@ object PendingActionPresenter {
             "daily_reminder" -> "每日提醒"
             "goal_exceeded" -> "超目标提醒"
             "anomaly" -> "异常提醒"
+            "proactive" -> "主动洞察"
             "daily_summary" -> "每日总结"
             "weekly_summary" -> "每周总结"
             // package_name 由 targetLabel 展示，摘要里不重复

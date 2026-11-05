@@ -53,6 +53,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -84,6 +85,7 @@ fun SettingsScreen() {
     val whitelistQuota by vm.whitelistQuota.collectAsStateWithLifecycle()
     val keepAlive by vm.keepAlive.collectAsStateWithLifecycle()
     val monitorState by vm.monitors.collectAsStateWithLifecycle()
+    val insightsState by vm.insights.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) {
         vm.refreshPermissions()
@@ -91,6 +93,7 @@ fun SettingsScreen() {
         vm.refreshWhitelistQuota()
         vm.refreshKeepAlive()
         vm.refreshMonitors()
+        vm.refreshInsights()
     }
 
     // 从系统/厂商页面（无障碍、电池优化、自启动）返回后重新读取状态
@@ -100,6 +103,7 @@ fun SettingsScreen() {
         vm.refreshQuotaUsage()
         vm.refreshWhitelistQuota()
         vm.refreshMonitors()
+        vm.refreshInsights()
     }
 
     // 以 DataStore 的值为 key 初始化：保存后自动同步，用户输入期间不会被覆盖
@@ -385,6 +389,73 @@ fun SettingsScreen() {
             }
         }
 
+        // AI 洞察（v1.9 Phase 6）：每天最多 1 条，后台主动分析生成
+        item {
+            SettingsCard(title = "AI 洞察") {
+                ToggleRow(
+                    label = "主动分析",
+                    checked = settings.notifyProactive,
+                    onChange = { enabled -> vm.setNotifyProactive(enabled) },
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "AI 每天最多生成 1 条洞察；关闭后后台不再做主动分析。",
+                    fontSize = 10.sp,
+                    color = colors.onSurfaceVariant,
+                    lineHeight = 15.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                if (insightsState.items.isEmpty()) {
+                    Text(
+                        text = "还没有洞察。AI 会在发现明显使用变化时提醒你（需要开启主动分析）",
+                        fontSize = 11.sp,
+                        color = colors.onSurfaceVariant,
+                        lineHeight = 16.sp,
+                    )
+                } else {
+                    insightsState.items.forEachIndexed { index, insight ->
+                        if (index > 0) {
+                            Spacer(Modifier.height(8.dp))
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = insight.title,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = insight.dateLabel,
+                                fontSize = 11.sp,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = insight.detail,
+                            fontSize = 11.sp,
+                            color = colors.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            lineHeight = 16.sp,
+                        )
+                        if (insight.suggestion.isNotBlank()) {
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text = "建议：${insight.suggestion}",
+                                fontSize = 11.sp,
+                                color = colors.primary,
+                                lineHeight = 16.sp,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // 限制模式（v1.8.1：三选一，替代旧的「默认限制」开关）
         item {
             SettingsCard(title = "限制模式") {
@@ -659,6 +730,64 @@ fun SettingsScreen() {
                         model = AppSettings.DEFAULT_MODEL
                         format = AppSettings.FORMAT_OPENAI
                     }) { Text("恢复默认", fontSize = 12.sp) }
+                }
+            }
+        }
+
+        // 模型路由（v1.9 Phase 7）：规划/复杂分析用更强模型，日常问答保持默认
+        item {
+            SettingsCard(title = "模型路由（可选）") {
+                var plannerModel by remember(settings.aiPlannerModel) { mutableStateOf(settings.aiPlannerModel) }
+                var savedHint by remember { mutableStateOf(false) }
+                LaunchedEffect(savedHint) {
+                    if (savedHint) {
+                        delay(1_500L)
+                        savedHint = false
+                    }
+                }
+                Text(
+                    text = "用于任务规划、复杂分析与报告；日常问答仍用默认模型，避免变慢。",
+                    fontSize = 11.sp,
+                    color = colors.onSurfaceVariant,
+                    lineHeight = 17.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = plannerModel,
+                    onValueChange = { plannerModel = it },
+                    label = { Text("规划模型", fontSize = 12.sp) },
+                    placeholder = {
+                        Text(
+                            text = "留空 = 与默认模型相同（${AppSettings.DEFAULT_MODEL}）",
+                            fontSize = 12.sp,
+                        )
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = if (savedHint) {
+                            "已保存"
+                        } else {
+                            "当前默认模型：${settings.aiModel.ifBlank { AppSettings.DEFAULT_MODEL }}"
+                        },
+                        fontSize = 11.sp,
+                        color = if (savedHint) colors.primary else colors.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Button(
+                        onClick = {
+                            vm.saveAiPlannerModel(plannerModel)
+                            savedHint = true
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                    ) {
+                        Text("保存", fontSize = 12.sp)
+                    }
                 }
             }
         }
