@@ -10,7 +10,7 @@
 | 3 | 上下文工程 + 长期记忆（对话摘要压缩、DB v5 画像/目标/反馈/决策、反馈识别、记忆工具） | ✅ 完成（真机已验证） | `agent/context/*`、`agent/memory/*`、`data/repo/MemoryRepository.kt`；77 单测；真机：REJECT/PREFER 写入 `agent_feedback`、`save_memory` 写 `agent_memory(profile)`、回答引用偏好、计划落库 |
 | 4 | 结构化响应（白名单 Block + 解析器 + Compose 渲染 + 本地图表） | ✅ 代码/单测完成，真机待补（设备断开） | `agent/response/*`、`ui/assistant/StructuredResponseView.kt`；86 单测；APK v27 未安装 |
 | 5 | 自定义监控（MonitorDefinition、校验、DB v6、15 分钟本地引擎、4 个工具、设置页卡片） | ✅ 代码/单测完成，真机待补（设备未连接） | `domain/monitor/*`、`data/repo/MonitorRepository.kt`、`work/MonitorCheckWorker.kt`、`agent/tools/MonitorTools.kt`；94 单测；APK v29 |
-| 6 | 主动 Agent + Feature Advisor | ⏳ 未开始 | — |
+| 6 | 主动 Agent + Feature Advisor（本地候选、每日 1 条洞察、DB v7、功能提案） | ✅ 代码/单测完成，真机待补（设备未连接） | `domain/insight/*`、`agent/proactive/*`、`agent/feature/*`、`data/repo/InsightRepository.kt`；111 单测；APK v30 |
 | 7 | 多 Agent + 模型路由 | ⏳ 未开始 | — |
 | 贯穿 | Agent Benchmark（Case 1–8） | ⏳ 未开始 | — |
 

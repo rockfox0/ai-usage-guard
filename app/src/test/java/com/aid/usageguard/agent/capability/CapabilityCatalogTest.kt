@@ -29,6 +29,8 @@ class CapabilityCatalogTest {
         "get_user_preferences", "set_ai_persona", "set_ai_analysis_enabled",
         // report_management (3)
         "generate_usage_report", "generate_report_now", "get_pending_actions",
+        // proactive_insight (3)
+        "get_proactive_insights", "propose_feature", "list_feature_proposals",
         // monitor_management (4)
         "create_monitor", "list_monitors", "remove_monitor", "monitor_history",
         // memory_management (5)

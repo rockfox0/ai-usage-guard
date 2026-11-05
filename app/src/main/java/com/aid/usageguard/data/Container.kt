@@ -5,6 +5,7 @@ import com.aid.usageguard.agent.contract.AgentRuntime
 import com.aid.usageguard.agent.contract.StubAgentRuntime
 import com.aid.usageguard.data.db.AppDatabase
 import com.aid.usageguard.data.repo.ActionDraftRepository
+import com.aid.usageguard.data.repo.InsightRepository
 import com.aid.usageguard.data.repo.MemoryRepository
 import com.aid.usageguard.data.repo.MonitorRepository
 import com.aid.usageguard.data.repo.BehaviorRepository
@@ -56,6 +57,10 @@ object Container {
     lateinit var actionDrafts: ActionDraftRepository
         private set
 
+    /** v1.9 Phase 6：主动洞察 */
+    lateinit var insights: InsightRepository
+        private set
+
     /** v1.9 Phase 5：自定义监控规则 */
     lateinit var monitors: MonitorRepository
         private set
@@ -95,6 +100,7 @@ object Container {
             actionDrafts = ActionDraftRepository(db)
             memory = MemoryRepository(db)
             monitors = MonitorRepository(db)
+            insights = InsightRepository(db)
             actionExecutor = ActionExecutor(settings, restrictions, usage, quota, whitelist, monitors)
             initialized = true
         }

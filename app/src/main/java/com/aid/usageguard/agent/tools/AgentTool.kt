@@ -188,6 +188,14 @@ internal fun JSONObject.intArg(key: String): Int? {
     return (opt(key) as? Number)?.toInt()
 }
 
+/** 字符串数组参数（缺失/非数组返回空列表）。 */
+internal fun JSONObject.stringListArg(key: String): List<String> {
+    val array = optJSONArray(key) ?: return emptyList()
+    return (0 until array.length()).mapNotNull { index ->
+        array.optString(index).trim().takeIf { it.isNotEmpty() && it != "null" }
+    }
+}
+
 /** 可选布尔参数。 */
 internal fun JSONObject.boolArg(key: String): Boolean? {
     if (!has(key) || isNull(key)) return null

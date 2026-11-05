@@ -141,6 +141,26 @@ object CapabilityCatalog {
             keywords = listOf("报告", "日报", "周报", "待确认", "草案", "report", "pending", "draft"),
         ),
         CapabilityDescriptor(
+            id = "proactive_insight",
+            name = "主动洞察与功能提案",
+            description = "查看 AI 主动分析出的使用洞察；把用户想要的新功能整理成结构化提案",
+            category = "analysis",
+            toolNames = listOf(
+                "get_proactive_insights",
+                "propose_feature",
+                "list_feature_proposals",
+            ),
+            examples = listOf(
+                "最近有什么值得注意的变化？",
+                "你觉得这个 App 还缺什么功能？",
+                "你之前给过哪些功能建议？",
+            ),
+            keywords = listOf(
+                "洞察", "主动", "建议", "缺什么", "新功能", "提案",
+                "insight", "proactive", "feature", "suggest",
+            ),
+        ),
+        CapabilityDescriptor(
             id = "monitor_management",
             name = "自定义监控",
             description = "用自然语言创建/查看/删除监控规则（指定应用、阈值、工作日/周末），由本地引擎定时判断并通知",

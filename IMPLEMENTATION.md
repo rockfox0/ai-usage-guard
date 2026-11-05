@@ -427,3 +427,32 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
 ### 测试
 - 新增 `MonitorValidatorTest`(8)，**总计 94 个单测全部通过**；能力目录 11 个能力 / 45 个工具；APK versionCode 29，MD5 `50318e669760e073b71a65a75f6f6509`。
 - 真机：设备仍未连接（vivo 未插回），Phase 4/5 真机回归待设备恢复。
+
+---
+
+## 二十四、v1.9 Phase 6：主动 Agent + Feature Advisor
+
+### 主动洞察（ProactiveAgent）
+- `domain/insight/InsightDetector.kt`（纯函数）：本地先筛候选——
+  总时长周环比 +25% 且日均多 30 分钟；单应用 +50% 且基数 ≥30 分钟；应用间时间转移（一降一升 ≥30%、总量变化 <10%）；今日超目标 20%。
+- `agent/proactive/ProactiveAgent.kt`：
+  - 每天最多 1 条（按日期去重），关「异常使用提醒」开关即停用；
+  - 仅当存在候选时调用 1 次模型（无工具、45s 超时），拿 `{title, detail, suggestion}`；
+  - 解析失败/模型不可用 → 退化成本地事实提醒（不编造、不静默丢弃）；
+  - 提示词明确「不做医学/心理诊断、不贴成瘾标签、不重复被拒方案」；带长期记忆（偏好/目标）。
+- DB v7：`proactive_insight`（date/kind/title/detail/suggestion/read）+ `InsightRepository`。
+- `AnomalyCheckWorker`（60 分钟）在本地行为分析后调用 `maybeGenerate()`，有洞察则通知
+  （新渠道 `proactive_insight`，低打扰）。
+
+### 功能提案（FeatureAdvisor）
+- `agent/feature/FeatureAdvisor.kt`：`FeatureProposal`（问题/收益/所需指标/所需能力/复杂度/优先级）+ 校验
+  （能力 id 必须存在、指标必填、复杂度 P1-P3、优先级 HIGH/MEDIUM/LOW）+ JSON 往返。
+- 工具（归入能力 `proactive_insight`）：`get_proactive_insights`、`propose_feature`、`list_feature_proposals`；
+  提案存 `agent_memory(kind=feature)`。
+- 提示词规则 14：主动洞察与功能提案的触发条件；要求基于现有能力与真实数据；明确「上线新功能仍需版本更新，不能改自身 APK」。
+
+### 测试与产物
+- 新增 `InsightDetectorTest`(7)、`ProactiveParserTest`(4)、`FeatureAdvisorTest`(6)；
+  **总计 111 个单测全部通过**；能力 12 个 / 工具 48 个；APK versionCode 30，MD5 `c48f75c39d73eaa021e39933143e4c52`。
+- 已知缺口：洞察列表暂无独立 UI（先通过通知 + 助手工具查看）；主动分析复用「异常提醒」开关（未新增独立偏好项）。
+- 真机：设备仍未连接，Phase 4/5/6 真机回归待设备恢复。

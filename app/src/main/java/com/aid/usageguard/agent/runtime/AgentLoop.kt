@@ -29,6 +29,7 @@ import com.aid.usageguard.agent.response.ResponseParser
 import com.aid.usageguard.agent.tools.BehaviorTools
 import com.aid.usageguard.agent.tools.CapabilityTools
 import com.aid.usageguard.agent.tools.MemoryTools
+import com.aid.usageguard.agent.tools.InsightTools
 import com.aid.usageguard.agent.tools.MonitorTools
 import com.aid.usageguard.agent.tools.ControlTools
 import com.aid.usageguard.agent.tools.GuardTools
@@ -142,6 +143,7 @@ class AgentLoop(
             addAll(CapabilityTools().all)
             addAll(MemoryTools { memoryEngine }.all)
             addAll(MonitorTools(usage, eventSource, taskIdProvider = { currentTaskId.get() }).all)
+            addAll(InsightTools().all)
         },
     )
 
@@ -1187,6 +1189,13 @@ class AgentLoop(
                要删除规则先 list_monitors 拿 id，再 remove_monitor（也是待确认草案）。
                不要用 set_app_daily_limit / set_focus_window 冒充监控规则——它们拦截应用，监控只通知。
 
+            14. 「主动洞察」：后台会先在本地找使用变化候选，再让 AI 生成洞察（每天最多 1 条，关「异常提醒」即停用）。
+               用户问「最近有什么变化 / 你发现什么 / 有没有值得注意的」→ 用 get_proactive_insights 读取，再结合当前数据解释。
+               用户问「这个 App 还缺什么功能 / 我希望有 X 功能 / 你之前给过什么功能建议」：
+               先用 list_feature_proposals 看历史建议；确实要提新功能时，用 propose_feature 记录结构化提案
+               （问题/收益/所需指标/所需能力/复杂度/优先级）。必须基于现有能力与真实数据，不要输出泛泛的数字健康清单；
+               并说明「真正上线新功能仍需版本更新」，你不能修改自身 APK 代码。
+
             今天的日期是 %TODAY%。
         """.trimIndent()
 
@@ -1238,6 +1247,13 @@ class AgentLoop(
                用户问「我现在有哪些监控 / 触发过几次」用 list_monitors / monitor_history；
                要删除规则先 list_monitors 拿 id，再 remove_monitor（也是待确认草案）。
                不要用 set_app_daily_limit / set_focus_window 冒充监控规则——它们拦截应用，监控只通知。
+
+            14. 「主动洞察」：后台会先在本地找使用变化候选，再让 AI 生成洞察（每天最多 1 条，关「异常提醒」即停用）。
+               用户问「最近有什么变化 / 你发现什么 / 有没有值得注意的」→ 用 get_proactive_insights 读取，再结合当前数据解释。
+               用户问「这个 App 还缺什么功能 / 我希望有 X 功能 / 你之前给过什么功能建议」：
+               先用 list_feature_proposals 看历史建议；确实要提新功能时，用 propose_feature 记录结构化提案
+               （问题/收益/所需指标/所需能力/复杂度/优先级）。必须基于现有能力与真实数据，不要输出泛泛的数字健康清单；
+               并说明「真正上线新功能仍需版本更新」，你不能修改自身 APK 代码。
 
             今天的日期是 %TODAY%。
         """.trimIndent()

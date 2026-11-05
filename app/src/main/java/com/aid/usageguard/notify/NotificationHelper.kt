@@ -42,6 +42,7 @@ object NotificationHelper {
     const val CHANNEL_ANOMALY = "anomaly"
     const val CHANNEL_AI_REPORT = "ai_report"
     const val CHANNEL_MONITOR = "monitor_alert"
+    const val CHANNEL_PROACTIVE = "proactive_insight"
 
     /** 固定通知 id：同一用途反复通知只会替换，不会堆积 */
     const val ID_DAILY_REMINDER = 1001
@@ -49,6 +50,7 @@ object NotificationHelper {
     const val ID_ANOMALY = 1003
     const val ID_REPORT_DAILY = 1004
     const val ID_MONITOR = 1005
+    const val ID_PROACTIVE = 1006
     const val ID_REPORT_WEEKLY = 1005
 
     private const val PREFS = "usageguard_notify_state"
@@ -76,6 +78,7 @@ object NotificationHelper {
             Channel(CHANNEL_ANOMALY, "异常使用提醒", NotificationManager.IMPORTANCE_HIGH),
             Channel(CHANNEL_AI_REPORT, "AI 使用报告", NotificationManager.IMPORTANCE_LOW),
             Channel(CHANNEL_MONITOR, "自定义监控提醒", NotificationManager.IMPORTANCE_DEFAULT),
+            Channel(CHANNEL_PROACTIVE, "主动洞察", NotificationManager.IMPORTANCE_LOW),
         )
         channels.forEach { item ->
             val channel = NotificationChannel(item.id, item.name, item.importance)
@@ -95,6 +98,7 @@ object NotificationHelper {
                 NotificationHelper.CHANNEL_GOAL_EXCEEDED -> "当天使用时长超出你设定的目标时提醒"
                 NotificationHelper.CHANNEL_ANOMALY -> "检测到异常使用模式（用量激增、深夜使用、连续过长等）"
                 NotificationHelper.CHANNEL_MONITOR -> "你自己设置的监控规则被触发时提醒"
+                NotificationHelper.CHANNEL_PROACTIVE -> "AI 主动发现的使用变化与建议"
                 else -> "AI 生成的日报 / 周报"
             }
     }
@@ -188,6 +192,22 @@ object NotificationHelper {
     }
 
     /** 本地行为分析产出的异常事件（最多展开 3 条） */
+    /** 主动洞察通知（v1.9 Phase 6）：每天最多一条，由 ProactiveAgent 去重 */
+    suspend fun notifyProactiveInsight(
+        context: Context,
+        insight: com.aid.usageguard.domain.insight.ProactiveInsight,
+        settings: AppSettings? = null,
+    ): Boolean {
+        val cfg = settingsOf(settings)
+        if (!cfg.notificationEnabled || !cfg.notifyAnomaly) return false
+        if (!canNotify(context)) return false
+        val body = buildString {
+            append(insight.detail)
+            if (insight.suggestion.isNotBlank()) append("\n建议：").append(insight.suggestion)
+        }
+        return _post(context, CHANNEL_PROACTIVE, ID_PROACTIVE, insight.title, body)
+    }
+
     /**
      * 自定义监控触发通知（v1.9 Phase 5）：本地规则引擎判定后调用，不经过模型。
      * 同一规则同一天只触发一次，由 MonitorEngine 去重。

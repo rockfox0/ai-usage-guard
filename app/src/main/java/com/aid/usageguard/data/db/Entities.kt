@@ -225,3 +225,16 @@ data class MonitorTriggerEntity(
     val message: String,
     val triggeredAt: Long,
 )
+
+/** 主动洞察（v1.9 Phase 6）：本地候选 → LLM 分析 → 通知/列表，按天去重 */
+@Entity(tableName = "proactive_insight")
+data class ProactiveInsightEntity(
+    @PrimaryKey val id: String,
+    val date: String,
+    val kind: String,
+    val title: String,
+    val detail: String,
+    val suggestion: String,
+    val `read`: Boolean,
+    val createdAt: Long,
+)

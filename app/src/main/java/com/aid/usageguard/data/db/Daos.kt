@@ -318,3 +318,21 @@ interface MonitorTriggerDao {
     @Query("SELECT COUNT(*) FROM monitor_trigger WHERE ruleId = :ruleId AND date = :date")
     suspend fun countFor(ruleId: String, date: String): Int
 }
+
+@Dao
+interface ProactiveInsightDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(item: ProactiveInsightEntity)
+
+    @Query("SELECT * FROM proactive_insight ORDER BY createdAt DESC LIMIT :limit")
+    suspend fun recent(limit: Int = 20): List<ProactiveInsightEntity>
+
+    @Query("SELECT COUNT(*) FROM proactive_insight WHERE date = :date")
+    suspend fun countForDate(date: String): Int
+
+    @Query("SELECT * FROM proactive_insight WHERE date = :date LIMIT 1")
+    suspend fun firstForDate(date: String): ProactiveInsightEntity?
+
+    @Query("UPDATE proactive_insight SET `read` = 1 WHERE id = :id")
+    suspend fun markRead(id: String)
+}

@@ -25,8 +25,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AgentFeedbackEntity::class,
         MonitorRuleEntity::class,
         MonitorTriggerEntity::class,
+        ProactiveInsightEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -46,6 +47,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun agentFeedbackDao(): AgentFeedbackDao
     abstract fun monitorRuleDao(): MonitorRuleDao
     abstract fun monitorTriggerDao(): MonitorTriggerDao
+    abstract fun proactiveInsightDao(): ProactiveInsightDao
 
     companion object {
         /** v1 → v2：新增每日评分表（保留历史使用数据，不破坏性迁移） */
@@ -187,6 +189,25 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v6 → v7：主动洞察（Proactive Agent） */
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `proactive_insight` (
+                        `id` TEXT NOT NULL,
+                        `date` TEXT NOT NULL,
+                        `kind` TEXT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `detail` TEXT NOT NULL,
+                        `suggestion` TEXT NOT NULL,
+                        `read` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )""".trimIndent(),
+                )
+            }
+        }
+
         @Volatile
         private var instance: AppDatabase? = null
 
@@ -196,7 +217,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "usage_guard.db",
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { instance = it }
