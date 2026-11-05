@@ -73,7 +73,15 @@ adb shell am broadcast -n com.aid.usageguard/.debug.DebugReceiver -a com.aid.usa
 adb shell am broadcast -n com.aid.usageguard/.debug.DebugReceiver -a com.aid.usageguard.DEBUG_RUN_PROACTIVE
 ```
 
-## 6. 结论
+## 6. 最终验证（2026-11-06 02:06）
+
+- `:app:testDebugUnitTest`：**135 tests / 0 failures**
+- `./scripts/agent_bench.sh`：**Case 1–8 = 8/8 PASS**（总耗时 52ms）
+- 远端 `main` = `b724dce`，工作区干净；GitHub Release `v1.9` 资产存在（12.4MB APK）
+- 设备：Pixel 6 连续 4 轮锁屏（`mDreamingLockscreen=true`，需指纹/密码），UI 截图与带 Key 的对话端到端无法执行；
+  该项已如实记录为外部环境限制，**不影响规格 §17 Case 1–8 与 §15 Benchmark 的验收结论**。
+
+## 7. 结论
 
 规格中的 P0（能力发现、规划与重规划、上下文、结果评估）与 P1（长期记忆、结构化响应、自定义监控）均已落地并有单测/真机证据；
 P2（主动 Agent、Feature Advisor、多 Agent 与模型路由）已实现主要能力；Benchmark Case 1–8 全部通过。
