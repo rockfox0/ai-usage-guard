@@ -138,6 +138,17 @@ fun AssistantScreen(
                     items(state.messages, key = { it.id }) { message ->
                         MessageBubble(message = message)
                     }
+                    if (state.structuredBlocks.isNotEmpty()) {
+                        item(key = "structured") {
+                            StructuredResponseView(
+                                title = state.structuredTitle,
+                                blocks = state.structuredBlocks,
+                                chartDaily = state.chartDaily,
+                                onFollowUp = viewModel::onInputChange,
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                            )
+                        }
+                    }
                     state.actionCards.forEach { card ->
                         item(key = "action_${card.opId}") {
                             PendingActionItem(

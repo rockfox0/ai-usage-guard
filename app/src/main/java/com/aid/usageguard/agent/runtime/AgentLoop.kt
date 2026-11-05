@@ -25,6 +25,7 @@ import com.aid.usageguard.agent.plan.TaskMode
 import com.aid.usageguard.agent.plan.TaskModeClassifier
 import com.aid.usageguard.agent.plan.TaskPlan
 import com.aid.usageguard.agent.plan.TaskPlanner
+import com.aid.usageguard.agent.response.ResponseParser
 import com.aid.usageguard.agent.tools.BehaviorTools
 import com.aid.usageguard.agent.tools.CapabilityTools
 import com.aid.usageguard.agent.tools.MemoryTools
@@ -748,6 +749,14 @@ class AgentLoop(
                 text = if (text.isBlank()) note else "$text\n\n$note"
             }
             // 报告任务预算不足时返回 ok=false，让上层走本地规则报告；对话里则把部分结果正常展示
+            // v1.9 Phase 4：若模型附带白名单 JSON 块，剥离正文并发出结构化事件（解析失败则保持原样）
+            if (request.scope == TaskScope.CHAT && text.isNotBlank()) {
+                runCatching { ResponseParser.extract(text) }.getOrNull()?.let { extracted ->
+                    text = extracted.text.ifBlank { text }
+                    emit(AgentEvent.StructuredResponse(extracted.response.title, extracted.response.blocks))
+                    Log.i(TAG, "structured response: blocks=${extracted.response.blocks.size}")
+                }
+            }
             val ok = text.isNotBlank() && (
                 if (budgetExhausted) request.scope == TaskScope.CHAT else finalOk
                 )
@@ -1155,6 +1164,19 @@ class AgentLoop(
                不要臆造不存在的能力或工具名；也不要说「我做不到」而不先尝试 discover/load。
                页面上下文（来源页面/当前应用）只用于定位对象，统计数字仍必须调用工具获取。
 
+            12. 当回答里有「多个关键数字 / 前后对比 / 可执行建议 / 明确的后续操作」时，可以在正文最后
+               追加一个 ```json 代码块来生成结构化卡片（不是每次都要；纯文字问答不要加）：
+               {"title":"可选标题","blocks":[
+                 {"type":"statistic","title":"本周概览","items":[{"label":"日均","value":"180 分钟"}]},
+                 {"type":"insight","title":"夜间使用偏高","severity":"medium","detail":"..."},
+                 {"type":"recommendation","title":"设置夜间目标","detail":"...","requires_confirmation":true},
+                 {"type":"comparison","title":"与上周对比","rows":[{"label":"日均","left":"180","right":"200"}]},
+                 {"type":"chart","chart":"daily_usage_7d","title":"最近 7 天使用"},
+                 {"type":"follow_up","label":"和上周对比","prompt":"帮我对比最近一周和上一周"}
+               ]}
+               规则：blocks 最多 6 个；数字必须来自工具结果，不能编造；chart 只支持 daily_usage_7d（数据由本地填充）；
+               requires_confirmation 只表示"需要用户确认"，不要说已经执行；JSON 块之外仍要有正常中文正文。
+
             今天的日期是 %TODAY%。
         """.trimIndent()
 
@@ -1185,6 +1207,19 @@ class AgentLoop(
                搜索能力，再调用 load_capability(capability_id) 加载；加载后**下一轮**才能调用这些工具。
                不要臆造不存在的能力或工具名；也不要说「我做不到」而不先尝试 discover/load。
                页面上下文（来源页面/当前应用）只用于定位对象，统计数字仍必须调用工具获取。
+
+            12. 当回答里有「多个关键数字 / 前后对比 / 可执行建议 / 明确的后续操作」时，可以在正文最后
+               追加一个 ```json 代码块来生成结构化卡片（不是每次都要；纯文字问答不要加）：
+               {"title":"可选标题","blocks":[
+                 {"type":"statistic","title":"本周概览","items":[{"label":"日均","value":"180 分钟"}]},
+                 {"type":"insight","title":"夜间使用偏高","severity":"medium","detail":"..."},
+                 {"type":"recommendation","title":"设置夜间目标","detail":"...","requires_confirmation":true},
+                 {"type":"comparison","title":"与上周对比","rows":[{"label":"日均","left":"180","right":"200"}]},
+                 {"type":"chart","chart":"daily_usage_7d","title":"最近 7 天使用"},
+                 {"type":"follow_up","label":"和上周对比","prompt":"帮我对比最近一周和上一周"}
+               ]}
+               规则：blocks 最多 6 个；数字必须来自工具结果，不能编造；chart 只支持 daily_usage_7d（数据由本地填充）；
+               requires_confirmation 只表示"需要用户确认"，不要说已经执行；JSON 块之外仍要有正常中文正文。
 
             今天的日期是 %TODAY%。
         """.trimIndent()

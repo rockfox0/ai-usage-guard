@@ -53,6 +53,12 @@ sealed interface AgentEvent {
     /** 本地数据卡片：kind + 已绑定的数据 JSON（数值来自本地查询，不是模型自填） */
     data class DataBlock(val kind: String, val payloadJson: String) : AgentEvent
 
+    /** 结构化回复（v1.9 Phase 4）：白名单 block，数字来自本地工具结果 */
+    data class StructuredResponse(
+        val title: String?,
+        val blocks: List<com.aid.usageguard.agent.response.ResponseBlock>,
+    ) : AgentEvent
+
     /** 待用户确认的操作草案 */
     data class ActionProposed(
         val opId: String,

@@ -367,3 +367,27 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
   - 记忆影响行为：后续复杂分析回答出现「按你的偏好，我就不再劝你设限额了」✅
   - 计划落库（本版新增 `kind=plan`）：`agent_memory(plan)` 记录 mode=ANALYSIS、3 步、能力与 4 条完成条件 ✅
   - 测试数据已清理（删除测试对话/假反馈/测试记忆，保留用户真实历史 49 条）
+
+---
+
+## 二十二、v1.9 Phase 4：结构化响应
+
+- 新增 `agent/response/`：
+  - `ResponseBlocks.kt`：`AgentResponse(title, blocks)` + 白名单 block：
+    `Text / StatisticCard / InsightCard / RecommendationCard / ComparisonBlock / ChartBlock / FollowUpAction`；
+    `ChartBlock` 只允许 `daily_usage_7d`（数据由本地聚合填充，模型不能填数）。
+  - `ResponseParser.kt`（纯函数）：从模型输出里找最后一个 ```json 代码块 → 校验类型/字段/数量（≤6 blocks、统计项 ≤6、对比行 ≤6）；
+    任何一个非法 block → 整体放弃、保留 Markdown 原文（不会出现"半卡片"）。
+- `AgentEvent.StructuredResponse(title, blocks)`：AgentLoop 在收尾时解析并 emit，同时把 JSON 块从正文剥离
+  （落库的对话内容不含 ```json，历史回放不会污染上下文）。
+- 提示词：CHAT_SYSTEM 规则 12 —— 有多个关键数字/对比/建议/后续操作时才追加 JSON 块；数字必须来自工具；
+  `requires_confirmation` 只表示"需用户确认"，不得声称已执行。
+- UI：
+  - `ui/assistant/StructuredResponseView.kt`：Compose 渲染统计卡、洞察卡（severity 配色）、建议卡（确认提示）、
+    对比表、本地 7 天柱状图、FollowUp chip（点击填入输入框继续追问）。
+  - `AssistantViewModel`：新增 `structuredTitle/structuredBlocks/chartDaily`，收到事件后渲染；
+    图表数据由本地 `usage.dailyTotalsForLastDays(7)` 填充；发送新消息/清空对话时重置。
+- 测试：新增 `ResponseParserTest`(9)，**总计 86 个单测全部通过**。
+- APK：versionCode 27，MD5 `f34600a9fac8864b96434113eefab410`。
+- 真机：本轮设备断开（vivo 拔线、Pixel 未装本 App），未安装/未回归；下轮设备恢复后验证
+  （验证点：结构化卡片出现、正文无 JSON、图表来自本地数据、FollowUp 可点击）。

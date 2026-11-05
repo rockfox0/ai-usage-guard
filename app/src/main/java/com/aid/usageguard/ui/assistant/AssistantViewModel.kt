@@ -46,6 +46,10 @@ data class AssistantUiState(
     val configured: Boolean = false,
     /** 例如 "deepseek-chat · OpenAI 兼容" */
     val modelLabel: String = "",
+    /** v1.9 Phase 4：结构化回复（白名单 block） */
+    val structuredTitle: String? = null,
+    val structuredBlocks: List<com.aid.usageguard.agent.response.ResponseBlock> = emptyList(),
+    val chartDaily: List<com.aid.usageguard.domain.model.DailyTotal> = emptyList(),
     /** 最近一次回答调用过的工具名 */
     val lastToolCalls: List<String> = emptyList(),
     /** 流式回答当前累计文本（AgentEvent.TextDelta 累计） */
@@ -251,6 +255,7 @@ class AssistantViewModel(
 
     /** 清空对话（同时清空 Room 里的 agent_message） */
     fun clear() {
+        _state.update { it.copy(structuredTitle = null, structuredBlocks = emptyList(), chartDaily = emptyList()) }
         sendJob?.cancel()
         sendJob = null
         flushJob?.cancel()
@@ -344,6 +349,22 @@ class AssistantViewModel(
 
             is AgentEvent.ToolFinished -> _state.update {
                 it.copy(toolStatus = if (event.ok) "已完成：${toolLabel(event.name)}" else "工具失败：${toolLabel(event.name)}")
+            }
+
+            is AgentEvent.StructuredResponse -> {
+                _state.update {
+                    it.copy(
+                        structuredTitle = event.title,
+                        structuredBlocks = event.blocks,
+                        chartDaily = emptyList(),
+                    )
+                }
+                if (event.blocks.any { it is com.aid.usageguard.agent.response.ResponseBlock.ChartBlock }) {
+                    viewModelScope.launch {
+                        val days = runCatching { usage.dailyTotalsForLastDays(7) }.getOrDefault(emptyList())
+                        _state.update { it.copy(chartDaily = days) }
+                    }
+                }
             }
 
             is AgentEvent.DataBlock -> _state.update {

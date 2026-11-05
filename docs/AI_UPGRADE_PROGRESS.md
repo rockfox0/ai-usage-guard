@@ -8,7 +8,7 @@
 | 1 | 动态能力发现（9 能力/34 工具、discover/load 元工具、执行器门禁） | ✅ 完成 | `agent/capability/*`、`agent/tools/CapabilityTools.kt`；48 单测；真机 `task tools: caps=[usage_analysis] tools=8/36`；commit `3568a4c` |
 | 2 | 动态任务规划 + 结果评估（Direct/Analysis/Goal、TaskPlan、NEED_MORE 补轮、数据不足说明） | ✅ 完成（真机已验证） | `agent/plan/*`、`AgentLoop` 集成；66 单测；真机：`agent_memory(plan)` 记录 mode=ANALYSIS / 3 步 / 能力 / 4 条完成条件；执行工具 `get_usage_trend`+`get_usage_score`；回答明确「30 天只有 9 天有记录」 |
 | 3 | 上下文工程 + 长期记忆（对话摘要压缩、DB v5 画像/目标/反馈/决策、反馈识别、记忆工具） | ✅ 完成（真机已验证） | `agent/context/*`、`agent/memory/*`、`data/repo/MemoryRepository.kt`；77 单测；真机：REJECT/PREFER 写入 `agent_feedback`、`save_memory` 写 `agent_memory(profile)`、回答引用偏好、计划落库 |
-| 4 | 结构化响应（AgentResponse + Compose 渲染） | ⏳ 未开始 | — |
+| 4 | 结构化响应（白名单 Block + 解析器 + Compose 渲染 + 本地图表） | ✅ 代码/单测完成，真机待补（设备断开） | `agent/response/*`、`ui/assistant/StructuredResponseView.kt`；86 单测；APK v27 未安装 |
 | 5 | 自定义监控（MonitorDefinition + 规则引擎） | ⏳ 未开始 | — |
 | 6 | 主动 Agent + Feature Advisor | ⏳ 未开始 | — |
 | 7 | 多 Agent + 模型路由 | ⏳ 未开始 | — |
