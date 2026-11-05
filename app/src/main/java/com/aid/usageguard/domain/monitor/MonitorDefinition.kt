@@ -23,7 +23,14 @@ enum class MonitorOperator(val symbol: String) {
 enum class MonitorSchedule(val label: String) {
     EVERY_DAY("每天"),
     WEEKDAYS("工作日"),
-    WEEKENDS("周末"),
+    WEEKENDS("周末");
+
+    /** 当天是否生效（v1.9 Phase 5/7：Engine 与 Benchmark 共用同一份判断） */
+    fun matches(day: java.time.DayOfWeek): Boolean = when (this) {
+        EVERY_DAY -> true
+        WEEKDAYS -> day != java.time.DayOfWeek.SATURDAY && day != java.time.DayOfWeek.SUNDAY
+        WEEKENDS -> day == java.time.DayOfWeek.SATURDAY || day == java.time.DayOfWeek.SUNDAY
+    }
 }
 
 enum class MonitorAction {

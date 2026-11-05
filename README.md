@@ -164,6 +164,7 @@ adb shell settings put secure accessibility_enabled 1
 | v1.9 Phase 5 | 自定义监控：自然语言建规则（create/list/remove_monitor）、DB v6 规则+触发历史、15 分钟本地引擎（不调模型）、通知渠道、设置页「我的监控」卡（94 单测） |
 | v1.9 Phase 6 | 主动 Agent + 功能提案：本地候选检测（周环比/时间转移/超目标）、每天最多 1 条洞察（LLM 分析、失败退化为本地事实）、DB v7、FeatureProposal 结构化提案与工具（111 单测） |
 | v1.9 Phase 7 | 模型路由 + 只读专家子 Agent：`ai_planner_model`（规划/子 Agent/报告用强模型）、复杂分析并行 2 个专家（本地快照、无工具、无副作用）、失败静默降级（124 单测） |
+| v1.9 Benchmark | Case 1–8 验收：模糊表达/多目标/上下文/缺能力/自定义监控/长期反馈/主动分析/功能建议，全链路真实代码断言，8/8 通过（125 单测） |
 
 详细实现说明见 [IMPLEMENTATION.md](IMPLEMENTATION.md)，各版本真机验收报告见 [docs/reports/](docs/reports/)，
 需求原文见 [docs/spec.md](docs/spec.md)。

@@ -13,7 +13,7 @@ android {
         applicationId = "com.aid.usageguard"
         minSdk = 26
         targetSdk = 35
-        versionCode = 31
+        versionCode = 32
         versionName = "1.7"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

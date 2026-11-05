@@ -28,7 +28,7 @@ class MonitorEngine(
 
         val triggered = ArrayList<MonitorTriggerResult>()
         for (rule in rules) {
-            if (!scheduleMatches(rule.schedule, day)) continue
+            if (!rule.schedule.matches(day)) continue
             if (runCatching { monitors.hasTriggered(rule.id, date) }.getOrDefault(false)) continue
 
             val value = when (rule.metric) {
@@ -56,12 +56,6 @@ class MonitorEngine(
             Log.i(TAG, "monitor triggered: ${rule.name} value=$value threshold=${rule.threshold}")
         }
         return triggered
-    }
-
-    private fun scheduleMatches(schedule: MonitorSchedule, day: DayOfWeek): Boolean = when (schedule) {
-        MonitorSchedule.EVERY_DAY -> true
-        MonitorSchedule.WEEKDAYS -> day != DayOfWeek.SATURDAY && day != DayOfWeek.SUNDAY
-        MonitorSchedule.WEEKENDS -> day == DayOfWeek.SATURDAY || day == DayOfWeek.SUNDAY
     }
 
     private fun compare(value: Long, threshold: Long, operator: MonitorOperator): Boolean = when (operator) {
