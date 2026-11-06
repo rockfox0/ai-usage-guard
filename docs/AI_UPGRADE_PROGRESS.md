@@ -43,6 +43,14 @@
 - `SettingsRepository.setAiPlannerModel` 补齐；**126 单测通过**（含脚本化端到端管线测试）；APK v34 已装 Pixel
 - 最终验收文档：`docs/AI_UPGRADE_ACCEPTANCE.md`（Case 对照 + 真机记录 + 已知限制）
 
+## vivo 真机端到端（v37，2026-11-06）
+
+- 设置页四卡：守护保活 / 我的监控 / AI 洞察 / 模型路由 ✅
+- Phase 4 结构化回复：统计卡 + 本地 7 天柱状图 + 后续 chip ✅（正文无 JSON）
+- Phase 5：AI 一句话建监控 → 确认 → 落库 → 设置页可见；本地引擎触发 `value=80 > threshold=1` + 通知 ✅
+- Phase 6：主动洞察由真实模型生成「哔哩哔哩近七天大幅上升」→ 落库 + 通知 + 设置卡显示 ✅
+- Phase 3 反馈：`too strict…` → REJECT 记忆，回复不再推进该建议 ✅
+
 ## 已知缺口（随阶段补齐）
 
 - Phase 2 的步骤级状态（StepStarted/StepFinished）尚未通过 AgentEvent 暴露给 UI；当前计划以日志 + 注入指令体现。

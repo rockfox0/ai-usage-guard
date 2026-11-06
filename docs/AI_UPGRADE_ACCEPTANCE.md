@@ -49,9 +49,25 @@ Benchmark 运行：`./scripts/agent_bench.sh` → **8/8 PASS**；**135 个 JVM �
 - **Phase 5 监控引擎**：注入规则 → `monitor triggered value=47 threshold=1` → `monitor_trigger` 落库 → `monitor_alert` 通知
 - 调试入口（仅 debug）：`DebugReceiver` 手动触发监控/同步/主动分析
 
+## 3.1 vivo 真机端到端验证（v37，2026-11-06）
+
+设备：vivo V2527A（Android 16），versionCode 37 / versionName 1.9，已配置 DeepSeek。
+
+| 验证点 | 结果 | 证据 |
+|---|---|---|
+| 设置页四张卡 | ✅ | 「守护保活」（含 adb 授权命令）/「我的监控」/「AI 洞察」/「模型路由（规划模型）」均可见 |
+| **Phase 4 结构化回复** | ✅ | 请求「render my weekly usage as cards」→ 回复正文 + 统计卡（总时长 76h55m/日均 659 分钟/目标 360/峰值 1049）+ **本地 7 天柱状图** + 后续操作 chip；落库正文不含 JSON |
+| **Phase 5 一句话建监控** | ✅ | 说「weekdays WeChat over 3 hours remind me」→ 生成 `CREATE_MONITOR` 草案（微信/180 分钟/工作日）→ 点「确认并执行」→ `pending_action=EXECUTED` → `monitor_rule` 落库 → 设置页显示「工作日「微信」使用时长超过 180 分钟 时提醒」 |
+| **Phase 5 本地引擎触发** | ✅ | 注入「全部应用 1 分钟」临时规则 → 调试广播 → `monitor_trigger(value=80, threshold=1)` + `monitor_alert` 通知；测试后清理 |
+| **Phase 6 主动洞察** | ✅ | 调试广播 → 真实模型生成洞察「哔哩哔哩近七天使用大幅上升（+2093 分钟 / +1041%）」→ `proactive_insight` 落库 + 通知 → 设置页「AI 洞察」卡显示 |
+| **Phase 3 反馈记忆** | ✅ | 说「this advice is too strict please do not remind me」→ `agent_feedback(REJECT)` 落库，回复「明白，这条监控我不再推进」 |
+| **Phase 2 数据不足说明** | ✅ | 「analyze my usage for the last month」→ 回复明确「月报实际只覆盖 9 天，周环比 +259% 是数据缺失造成的假象」 |
+
+截图：`docs/screenshots/12_structured_cards.png`、`13_monitor_card.png`、`14_insight_card.png`、`15_keepalive_monitors.png`
+
 ## 4. 已知限制（如实记录）
 
-1. **设备 UI 端到端**：Pixel 处于锁屏，Phase 4 结构化卡片、Phase 6 洞察卡、Phase 2/3 对话 UI 截图尚未完成（代码/单测已覆盖；解锁后可补）。
+1. **设备 UI 端到端**：已在 vivo v37 完成（结构化卡片/监控创建/洞察卡/反馈记忆，见 3.1）；Pixel 6 仍锁屏未做（不影响结论）。
 2. **AI 依赖配置**：Pixel 未配置 Key，主动 Agent 的 LLM 路径与聊天类验收需配置后才可跑。
 3. **force-stop**：系统级彻底停止无法自恢复（任何应用都无法），已说明。
 4. **洞察去重粒度**：同一自然日最多 1 条，不同类型不会同日并列。
@@ -75,8 +91,8 @@ adb shell am broadcast -n com.aid.usageguard/.debug.DebugReceiver -a com.aid.usa
 
 ## 6. 最终验证（2026-11-06 02:06）
 
-- `:app:testDebugUnitTest`：**135 tests / 0 failures**
-- `./scripts/agent_bench.sh`：**Case 1–8 = 8/8 PASS**（总耗时 52ms）
+- `:app:testDebugUnitTest`：**136 tests / 0 failures**
+- `./scripts/agent_bench.sh`：**Case 1–8 = 8/8 PASS**
 - 远端 `main` = `b724dce`，工作区干净；GitHub Release `v1.9` 资产存在（12.4MB APK）
 - 设备：Pixel 6 连续 4 轮锁屏（`mDreamingLockscreen=true`，需指纹/密码），UI 截图与带 Key 的对话端到端无法执行；
   该项已如实记录为外部环境限制，**不影响规格 §17 Case 1–8 与 §15 Benchmark 的验收结论**。
