@@ -27,6 +27,36 @@ object ResponseParser {
                 .trim()
             return Extracted(text = stripped, response = response)
         }
+        // 回退：模型有时输出**裸 JSON**（没有 ```json 围栏）；用括号配对找到含 blocks 的那个对象
+        val blocksIdx = text.lastIndexOf("\"blocks\"")
+        if (blocksIdx >= 0) {
+            val open = text.lastIndexOf('{', blocksIdx)
+            if (open >= 0) {
+                var depth = 0
+                var close = -1
+                for (i in open until text.length) {
+                    when (text[i]) {
+                        '{' -> depth++
+                        '}' -> {
+                            depth--
+                            if (depth == 0) {
+                                close = i
+                                break
+                            }
+                        }
+                    }
+                }
+                if (close > open) {
+                    val raw = text.substring(open, close + 1)
+                    parse(raw)?.let { response ->
+                        val stripped = (text.substring(0, open) + text.substring(close + 1))
+                            .replace(Regex("\\n{3,}"), "\n\n")
+                            .trim()
+                        return Extracted(text = stripped, response = response)
+                    }
+                }
+            }
+        }
         return null
     }
 

@@ -10,6 +10,21 @@ package com.aid.usageguard.restriction
  */
 object RestrictionPolicy {
 
+    /**
+     * v1.9.1 修正：**手动限制列表只在 MANUAL_ONLY 模式生效**。
+     *
+     * 之前的实现把 `explicitBlocked` 无条件传给策略，导致「超额后才限制」模式下
+     * 只要某个应用被历史遗留/误操作写入手动限制，就会在额度未超时也被拦截
+     * （用户实际遇到的哔哩哔哩问题）。现在按模式收敛，语义与 [RestrictionMode] 注释一致：
+     * - QUOTA_AFTER_BUDGET：只按额度拦，手动名单不参与；
+     * - ALWAYS_NON_WHITELIST：只按白名单拦，手动名单不参与；
+     * - MANUAL_ONLY：只按手动名单拦。
+     */
+    fun manualBlocksFor(
+        mode: RestrictionMode,
+        explicitBlocked: Set<String>,
+    ): Set<String> = if (mode == RestrictionMode.MANUAL_ONLY) explicitBlocked else emptySet()
+
     fun isRestricted(
         packageName: String,
         allowedPackages: Set<String>,

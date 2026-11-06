@@ -178,7 +178,23 @@ class AgentBenchmarkTest {
             val section = MemoryEngine.renderPromptSection(emptyList(), emptyList(), feedback)
             assertTrue("记忆摘要应包含被拒绝方案", section.contains("太严格"))
             assertTrue("记忆摘要应要求不重复被拒方案", section.contains("不要原样重复被拒绝过的方案"))
-            "signal=${detected.signal}；记忆摘要含拒绝项与约束"
+
+            // 同一类建议不能原样重复
+            assertTrue(
+                "「每天只玩 30 分钟」应命中被拒方案",
+                com.aid.usageguard.agent.memory.FeedbackSimilarity.isSimilar(
+                    "每天只玩 30 分钟",
+                    listOf("每天只玩 30 分钟太严格"),
+                ),
+            )
+            assertFalse(
+                "「设置夜间专注时段」不应被误伤",
+                com.aid.usageguard.agent.memory.FeedbackSimilarity.isSimilar(
+                    "设置夜间专注时段",
+                    listOf("每天只玩 30 分钟太严格"),
+                ),
+            )
+            "signal=${detected.signal}；记忆摘要含拒绝项与约束；相似度判定正确"
         }
 
         // ---------- Case 7：主动分析 ----------

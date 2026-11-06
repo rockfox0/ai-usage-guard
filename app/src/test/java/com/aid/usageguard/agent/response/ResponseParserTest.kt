@@ -70,6 +70,15 @@ class ResponseParserTest {
     }
 
     @Test
+    fun `无围栏的裸 JSON 也能解析（模型有时不加围栏）`() {
+        val text = """本周日均 180 分钟。{"title":"概览","blocks":[{"type":"statistic","title":"概览","items":[{"label":"日均","value":"180 分钟"}]}]}"""
+        val extracted = ResponseParser.extract(text)
+        assertNotNull(extracted)
+        assertEquals(1, extracted!!.response.blocks.size)
+        assertEquals("本周日均 180 分钟。", extracted.text)
+    }
+
+    @Test
     fun `没有 json 块时不产生结构化回复`() {
         assertNull(ResponseParser.extract("今天用了 20 分钟。"))
     }

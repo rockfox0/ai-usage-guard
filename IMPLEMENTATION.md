@@ -524,3 +524,30 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
 
 ### 验证
 - 编译通过；**125 单测全部通过**；APK versionCode 34，MD5 `dd559038a22905503ecb6ae6eb6d237a`，已安装到 Pixel 6（锁屏状态，UI 截图待解锁）。
+
+---
+
+## 二十八、v1.9.1：修复「手动限制列表」破坏限制模式语义
+
+**问题（用户真机报告）**：在「超额后才限制」模式下、今日额度未超（78/360 分钟），哔哩哔哩仍被强制暂停浮层拦截。
+
+**原因**：
+- `restriction_rule` 是旧版「手动限制列表」（`packageName / dailyLimitMinutes / blockedStartTime / blockedEndTime / enabled`），
+  由应用页开关或历史 AI 草案写入；
+- `GuardService` 把 `explicitBlocked` **无条件**传给 `RestrictionPolicy`，因此只要表里有该应用且 enabled，
+  就与额度无关地拦截 —— 与 `RestrictionMode` 注释（「额度内所有应用都能用」）自相矛盾；
+- 真机上 `tv.danmaku.bili` 正好有一条 enabled 的手动限制行，导致用户“没超额也被拦”。
+  同时设置里还存在 `restrict_by_default=true` 与 `restriction_mode=QUOTA_AFTER_BUDGET` 的历史矛盾状态，会被 UI/AI 工具误读。
+
+**修复**：
+1. `RestrictionPolicy.manualBlocksFor(mode, explicitBlocked)`：**手动名单只在 `MANUAL_ONLY` 生效**；
+   `QUOTA_AFTER_BUDGET`/`ALWAYS_NON_WHITELIST` 下手动名单不参与判断。`GuardService` 改用该函数并修正注释。
+2. `RestrictionMode.legacyFlag(mode)`：模式成为唯一真源，`restrictByDefault` 由 `restriction_mode` 派生，
+   消除历史矛盾状态（避免 UI/AI 说“默认限制中”但实际是超额模式）。
+3. 新增 `RestrictionModeGateTest`（6 条）：额度模式忽略手动名单、只限制模式保留手动名单、白名单全模式豁免等；
+   **142 个单测全部通过**。
+4. 真机数据处理：移除 `tv.danmaku.bili` 的手动限制行（保留用户的抖音/王者行，但在额度模式下不再生效）。
+
+**真机验证（vivo v39）**：
+- 额度内：哔哩哔哩正常打开（前台 `UnitedBizDetailsActivity`，无守护浮层）；
+- 把每日目标临时设为 1 分钟后：哔哩哔哩被拦截（额度逻辑未被破坏）；恢复 360 分钟后正常打开。

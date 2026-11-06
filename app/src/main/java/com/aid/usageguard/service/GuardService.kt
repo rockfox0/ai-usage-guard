@@ -195,15 +195,16 @@ class GuardService : AccessibilityService() {
         creditQuota(pkg)
         resetQuotaIfNewDay()
 
-        // 限制模式：
-        // - QUOTA_AFTER_BUDGET：额度内所有应用都放行，只按「手动限制」判断，超额交给 QuotaPolicy；
-        // - ALWAYS_NON_WHITELIST：始终拦非白名单；
+        // 限制模式（v1.9.1 修正）：
+        // - QUOTA_AFTER_BUDGET：额度内所有应用放行（手动名单不参与），超额交给 QuotaPolicy；
+        // - ALWAYS_NON_WHITELIST：始终拦非白名单（手动名单不参与）；
         // - MANUAL_ONLY：只拦手动指定。
         val alwaysBlockNonWhitelist = restrictionMode == RestrictionMode.ALWAYS_NON_WHITELIST
+        val activeManualBlocks = RestrictionPolicy.manualBlocksFor(restrictionMode, explicitBlocked)
         val ruleBlocked = RestrictionPolicy.isRestricted(
             packageName = pkg,
             allowedPackages = allowedPackages,
-            explicitBlocked = explicitBlocked,
+            explicitBlocked = activeManualBlocks,
             restrictByDefault = alwaysBlockNonWhitelist,
             protectedPackages = protectedPackages,
         )

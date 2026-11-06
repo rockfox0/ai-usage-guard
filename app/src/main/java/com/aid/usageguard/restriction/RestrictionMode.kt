@@ -32,5 +32,12 @@ enum class RestrictionMode(val label: String, val description: String) {
         /** 兼容旧的布尔设置：true=始终限制，false=只限制指定应用 */
         fun fromLegacy(restrictByDefault: Boolean): RestrictionMode =
             if (restrictByDefault) ALWAYS_NON_WHITELIST else MANUAL_ONLY
+
+        /**
+         * v1.9.1：模式是唯一真源，旧布尔值由模式派生。
+         * 历史上存在「restrict_by_default=true + QUOTA_AFTER_BUDGET」这类矛盾状态，
+         * 导致 UI/AI 工具误报「默认限制中，但页面写超额后才限制」。
+         */
+        fun legacyFlag(mode: RestrictionMode): Boolean = mode == ALWAYS_NON_WHITELIST
     }
 }

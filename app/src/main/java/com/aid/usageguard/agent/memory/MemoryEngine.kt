@@ -81,11 +81,7 @@ class MemoryEngine(private val repo: MemoryRepository) {
             repo.recentFeedback(20).filter { it.signal == "REJECT" }
         }.getOrDefault(emptyList())
         if (rejected.isEmpty()) return false
-        val tokens = suggestion.lowercase().split(Regex("[\\s，,。.；;：:]+")).filter { it.length >= 2 }
-        return rejected.any { fb ->
-            val reason = fb.reason.lowercase()
-            tokens.any { reason.contains(it) && it.length >= 3 }
-        }
+        return FeedbackSimilarity.isSimilar(suggestion, rejected.map { it.reason })
     }
 
     companion object {
