@@ -423,6 +423,10 @@ class AgentLoop(
                     message = "尚未配置可用的模型接口：请在「设置 → AI 接口」里填写 BaseURL 与 API Key。",
                     source = "LOCAL",
                 )
+                // v1.9.3：失败提示也写入对话记忆，避免历史中出现没有回复的用户消息
+                if (request.useMemory) {
+                    runCatching { memory.appendAssistant(request.sessionId, outcome.text) }
+                }
                 emit(AgentEvent.Failed(outcome.text, "not_configured"))
                 return outcome
             } else {
@@ -803,7 +807,9 @@ class AgentLoop(
             if (budgetReason != null) {
                 // 预算耗尽且模型还没给正文时，至少用已执行工具的结果组装部分结论，而不是只回一句预算提示
                 if (text.isBlank()) {
-                    runCatching { text = fallbackFromTools(usedTools, messages) }.getOrNull()
+                    runCatching {
+                        text = fallbackFromTools(usedTools, messages, "本次任务已达到资源预算上限")
+                    }.getOrNull()
                     text = text.trim()
                 }
                 val note = "（本次任务已达到资源预算上限：$budgetReason。以上为已完成的部分结果。）"
@@ -850,6 +856,11 @@ class AgentLoop(
         } catch (e: Exception) {
             val message = "模型调用失败：${friendlyError(e)}"
             _state.value = _state.value.finish(AgentPhase.FAILED, message)
+            // v1.9.3 修复：失败时也写一条 assistant 消息，避免历史里只有用户消息没有回复
+            // （用户重试时会看到"问题问了两遍"的错觉）
+            if (request.useMemory) {
+                runCatching { memory.appendAssistant(request.sessionId, message) }
+            }
             emit(AgentEvent.Failed(message, null))
             return AgentOutcome(
                 text = message,
@@ -868,7 +879,8 @@ class AgentLoop(
         source: String,
     ): AgentOutcome {
         _state.value = _state.value.finish(AgentPhase.FAILED, message)
-        // 失败提示不写进对话记忆：用户重试后历史仍然干净（用户消息已单独落库）
+        // v1.9.3：调用方会把失败提示写入对话记忆（见 catch / not_configured 分支），
+        // 避免"只有用户消息、没有回复"的孤儿历史；这里只负责状态与返回值。
         return AgentOutcome(
             text = message,
             source = source,
@@ -931,16 +943,20 @@ class AgentLoop(
         }
     }
 
-    /** 轮次用尽时的兜底文案：明确说明「已停止」，并带上最后一次工具结果。 */
-    private fun fallbackFromTools(toolNames: List<String>, messages: List<LlmMessage>): String {
-        val evidence = messages.lastOrNull { it.isToolResult }?.content.orEmpty()
-        return buildString {
-            append("（已达到本次任务的最大推理轮次 ").append(MAX_ROUNDS).append(" 轮，先给出已经查到的数据）\n")
-            if (toolNames.isNotEmpty()) {
-                append("已调用工具：").append(toolNames.distinct().joinToString("、")).append('\n')
-            }
-            if (evidence.isNotBlank()) append(evidence.take(1500))
-        }.trim()
+    /**
+     * 轮次/预算用尽时的兜底文案（v1.9.3 修复）：
+     * 以前直接把最后一次工具结果（JSON 原文）拼进对话，用户会看到原始 JSON；
+     * 现在改成「已查询工具 + 可读要点摘要」，并提示可以再问一次。
+     */
+    private fun fallbackFromTools(
+        toolNames: List<String>,
+        messages: List<LlmMessage>,
+        reason: String = "已达到本次任务的最大推理轮次 $MAX_ROUNDS 轮",
+    ): String {
+        val outputs = messages.filter { it.isToolResult }
+            .takeLast(4)
+            .map { it.content }
+        return ToolEvidence.fallbackText(toolNames, outputs, reason)
     }
 
     private fun friendlyError(error: Throwable): String = when (error) {

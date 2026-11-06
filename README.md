@@ -199,6 +199,7 @@ adb shell settings put secure accessibility_enabled 1
 | v1.9 Phase 7 | 模型路由 + 只读专家子 Agent：`ai_planner_model`（规划/子 Agent/报告用强模型）、复杂分析并行 2 个专家（本地快照、无工具、无副作用）、失败静默降级（124 单测） |
 | v1.9 收尾 | 主动分析独立开关、设置页「AI 洞察」卡与「模型路由」配置、调试触发入口（126 单测） |
 | v1.9.2 | 手动限制列表按模式收敛（修复未超额被拦）、AI 操作权限可选自动执行、149 单测 |
+| v1.9.3 | 修复轮次耗尽显示原始 JSON、请求失败留下无回复消息；155 单测 |
 | v1.9 Benchmark | Case 1–8 验收：模糊表达/多目标/上下文/缺能力/自定义监控/长期反馈/主动分析/功能建议，全链路真实代码断言，8/8 通过（125 单测） |
 
 详细实现说明见 [IMPLEMENTATION.md](IMPLEMENTATION.md)，各版本真机验收报告见 [docs/reports/](docs/reports/)，

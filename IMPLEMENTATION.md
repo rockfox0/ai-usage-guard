@@ -584,3 +584,37 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
   - 开启自动执行后对 AI 说「set my daily target to 350 minutes」→ **无需确认**：`pending_action SET_DAILY_TARGET=EXECUTED`（360→350），
     `daily_target_minutes=350`，回复「已把每日目标改为 350 分钟（原为 360）。这次是自动执行，已经生效」；
   - 测试后已恢复 `daily_target_minutes=360`、`auto_execute_writes=false`（默认每次确认）。
+
+---
+
+## 三十、v1.9.3：Bug 修复（真机排查）
+
+用户报告「似乎还有 bug」，逐项排查后确认并修复 2 个真实缺陷：
+
+### Bug 1：轮次/预算耗尽时把工具 JSON 原样喷进对话
+- 现象：复杂任务（如建监控）达到 4 轮上限时，回答里出现
+  `（已达到本次任务的最大推理轮次 4 轮…）已调用工具：… {"executed":false,"requiresConfirmation":true,…}` 原始 JSON。
+- 原因：`fallbackFromTools` 直接把最后一条 tool 消息（JSON）`take(1500)` 拼进正文。
+- 修复：新增 `agent/runtime/ToolEvidence.kt`——把工具结果转成可读要点（优先 `message`/`error`，否则提取少量关键字段，
+  绝不回显花括号），兜底文案改为「已查询：… + - 要点 + 可再问一次」；预算耗尽路径同样使用。
+- 测试：`ToolEvidenceTest`(6)。
+
+### Bug 2：请求失败后用户消息没有对应回复（孤儿/重复消息）
+- 现象：真机数据库中 [199]「我被识典古籍拦截了」之后没有 assistant 回复；[204]/[205] 两条相同用户消息只得到一条回复。
+- 原因：`runTask` 在 appendUser 之后，异常/未配置路径只发 Failed 事件，**故意不写 assistant 记忆**（注释写着“保持历史干净”），
+  结果历史里残留无回复的用户消息；用户重发时看起来像“问了两遍”。
+- 修复：异常路径与 not_configured 路径都把失败说明写入对话记忆（一行「模型调用失败：…」），修正相关注释。
+- 效果：历史始终“用户消息→对应回复”，重试不会再出现孤儿问题。
+
+### 排查中确认「不是 bug」的两项
+1. 23:xx 哔哩哔哩被拦：当时处于**专注时段 00:00–07:00**（focus_window_enabled=true），只允许白名单 → 被拦符合设计；
+   临时关闭专注时段后 B 站正常打开（已恢复原设置）。
+2. 之前「没超额也被拦」：已由 v1.9.1 修复（手动限制列表只在 MANUAL_ONLY 模式生效）。
+
+### 仍未处理（已知，非阻断）
+- 结构化卡片仅存在于当前会话内存，重进助手页只剩文本（要持久化需 DB v8/新列）
+- `agent_memory(kind=plan/decision)` 只增不减（DB 轻微膨胀，可后续加清理策略）
+- 失败后输入框不会自动恢复原文（历史已完整，可手动重发）
+- `set_restrict_mode`（旧）与 `set_restriction_mode`（新）语义重叠，建议后续合并工具
+
+- 版本：versionCode 42 / versionName 1.9.3；**155 个单测全部通过**；vivo 真机安装并验证聊天/限制/专注时段行为正常。
