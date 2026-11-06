@@ -66,6 +66,7 @@ class ControlTools(
         SetAiPersonaTool(),
         SetAppRestrictionTool(),
         SetAiAnalysisEnabledTool(),
+        SetAiAutoExecuteTool(),
         RefreshUsageDataTool(),
         GenerateReportNowTool(),
         SendTestNotificationTool(),
@@ -718,6 +719,38 @@ class ControlTools(
                 after = JSONObject().put("enabled", enabled),
                 changed = changedOf("aiAnalysisEnabled" to change(before, enabled)),
                 message = if (enabled) "开启 AI 分析。" else "关闭 AI 分析（只用本地规则）。",
+            )
+        }
+    }
+
+    private inner class SetAiAutoExecuteTool : AgentTool {
+        override val name: String = "set_ai_auto_execute"
+        override val kind: ToolKind = ToolKind.PROPOSE
+        override val description: String =
+            "生成「AI 写操作权限」草案：false=每次确认（默认）；true=自动执行（工具调用后立即生效，不再弹确认）。"
+
+        override val parameters: JSONObject = JsonSchema.objectSchema(
+            properties = listOf(
+                "enabled" to JsonSchema.boolean("true=自动执行；false=每次确认"),
+            ),
+            required = listOf("enabled"),
+        )
+
+        override suspend fun execute(arguments: JSONObject): JSONObject {
+            val enabled = arguments.boolArg("enabled")
+                ?: throw ToolArgumentException("缺少必填参数 enabled（true / false）")
+            val before = settings.current().autoExecuteWrites
+            return proposeDraft(
+                type = "SET_AI_AUTO_EXECUTE",
+                params = JSONObject().put("enabled", enabled),
+                before = JSONObject().put("enabled", before),
+                after = JSONObject().put("enabled", enabled),
+                changed = changedOf("autoExecuteWrites" to change(before, enabled)),
+                message = if (enabled) {
+                    "开启自动执行：AI 的写操作（设置/限制/额度等）将立即生效，不再弹确认。"
+                } else {
+                    "改回每次确认：AI 写操作会先生成草案，由你确认后执行。"
+                },
             )
         }
     }

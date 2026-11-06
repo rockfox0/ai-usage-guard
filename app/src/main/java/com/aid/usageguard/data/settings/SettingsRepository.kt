@@ -29,6 +29,13 @@ data class AppSettings(
     val aiModel: String = DEFAULT_MODEL,
     /** 规划/复杂分析/子 Agent 用的模型；空 = 与 aiModel 相同（v1.9 Phase 7 模型路由） */
     val aiPlannerModel: String = "",
+
+    /**
+     * AI 写操作权限（v1.9.2）：
+     * false = 每次确认（默认，草案需用户点确认）；true = 自动执行（生成草案后立即确认并执行）。
+     * 两种模式都仍受执行器校验（系统保护应用 / 白名单每日额度 / 参数校验）。
+     */
+    val autoExecuteWrites: Boolean = false,
     val aiFormat: String = FORMAT_OPENAI,
     val notifyDailyReminder: Boolean = true,
     val notifyGoalExceeded: Boolean = true,
@@ -121,6 +128,7 @@ class SettingsRepository(private val context: Context) {
         val AI_API_KEY = stringPreferencesKey("ai_api_key")
         val AI_MODEL = stringPreferencesKey("ai_model")
         val AI_PLANNER_MODEL = stringPreferencesKey("ai_planner_model")
+        val AUTO_EXECUTE_WRITES = booleanPreferencesKey("auto_execute_writes")
         val AI_FORMAT = stringPreferencesKey("ai_format")
         val NOTIFY_DAILY_REMINDER = booleanPreferencesKey("notify_daily_reminder")
         val NOTIFY_GOAL_EXCEEDED = booleanPreferencesKey("notify_goal_exceeded")
@@ -162,6 +170,7 @@ class SettingsRepository(private val context: Context) {
             aiApiKey = prefs[Keys.AI_API_KEY] ?: defaults.aiApiKey,
             aiModel = prefs[Keys.AI_MODEL] ?: defaults.aiModel,
             aiPlannerModel = prefs[Keys.AI_PLANNER_MODEL] ?: defaults.aiPlannerModel,
+            autoExecuteWrites = prefs[Keys.AUTO_EXECUTE_WRITES] ?: defaults.autoExecuteWrites,
             aiFormat = prefs[Keys.AI_FORMAT] ?: defaults.aiFormat,
             notifyDailyReminder = prefs[Keys.NOTIFY_DAILY_REMINDER] ?: defaults.notifyDailyReminder,
             notifyGoalExceeded = prefs[Keys.NOTIFY_GOAL_EXCEEDED] ?: defaults.notifyGoalExceeded,
@@ -233,6 +242,9 @@ class SettingsRepository(private val context: Context) {
 
     /** v1.9 Phase 7：规划/子 Agent/报告用的模型（空 = 与默认模型相同） */
     suspend fun setAiPlannerModel(model: String) = edit { it[Keys.AI_PLANNER_MODEL] = model.trim() }
+
+    /** v1.9.2：AI 写操作权限（false = 每次确认；true = 自动执行） */
+    suspend fun setAutoExecuteWrites(enabled: Boolean) = edit { it[Keys.AUTO_EXECUTE_WRITES] = enabled }
 
     suspend fun setNotifyDailySummary(enabled: Boolean) = edit { it[Keys.NOTIFY_DAILY_SUMMARY] = enabled }
 

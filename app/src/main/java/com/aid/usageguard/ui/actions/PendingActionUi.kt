@@ -63,6 +63,7 @@ object PendingActionPresenter {
         "SET_NUDGE" -> "实时提示"
         "SET_AI_PERSONA" -> "AI 个性化"
         "SET_AI_ANALYSIS_ENABLED" -> "AI 分析开关"
+        "SET_AI_AUTO_EXECUTE" -> "AI 操作权限"
         "SET_WHITELIST" -> "白名单"
         "SET_APP_RESTRICTION" -> "应用限制"
         "SET_APP_DAILY_LIMIT" -> "应用每日限额"

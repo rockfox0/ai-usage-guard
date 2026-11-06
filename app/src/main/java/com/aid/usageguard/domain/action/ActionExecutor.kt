@@ -139,6 +139,17 @@ class ActionExecutor(
                     Result(true, "AI 个性化已更新")
                 }
 
+                "SET_AI_AUTO_EXECUTE" -> {
+                    val enabled = params(action).getBoolean("enabled")
+                    settings.setAutoExecuteWrites(enabled)
+                    val now = settings.current().autoExecuteWrites
+                    Result(
+                        now == enabled,
+                        if (now) "已开启自动执行：AI 写操作立即生效" else "已改为每次确认：AI 写操作需你确认",
+                        JSONObject().put("enabled", now).toString(),
+                    )
+                }
+
                 "SET_AI_ANALYSIS_ENABLED" -> {
                     val enabled = params(action).getBoolean("enabled")
                     settings.setAiAnalysisEnabled(enabled)

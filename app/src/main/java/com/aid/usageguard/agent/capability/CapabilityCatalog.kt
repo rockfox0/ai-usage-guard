@@ -122,9 +122,14 @@ object CapabilityCatalog {
         CapabilityDescriptor(
             id = "persona_settings",
             name = "AI 个性化",
-            description = "称呼、语气、关注点、自定义要求与 AI 分析开关",
+            description = "称呼、语气、关注点、自定义要求、AI 分析开关与 AI 写操作权限",
             category = "config",
-            toolNames = listOf("get_user_preferences", "set_ai_persona", "set_ai_analysis_enabled"),
+            toolNames = listOf(
+                "get_user_preferences",
+                "set_ai_persona",
+                "set_ai_analysis_enabled",
+                "set_ai_auto_execute",
+            ),
             examples = listOf("叫我老张", "语气温和一点", "多关注睡眠"),
             keywords = listOf(
                 "称呼", "语气", "人设", "个性化", "偏好", "性格",

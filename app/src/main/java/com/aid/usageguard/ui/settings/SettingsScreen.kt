@@ -4,6 +4,7 @@ import android.Manifest
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -789,6 +791,79 @@ fun SettingsScreen() {
                         Text("保存", fontSize = 12.sp)
                     }
                 }
+            }
+        }
+
+        // AI 操作权限（v1.9.2）：写操作是「每次确认」还是「自动执行」由用户选择
+        item {
+            SettingsCard(title = "AI 操作权限") {
+                val autoExecute = settings.autoExecuteWrites
+                val currentChoiceLabel = if (autoExecute) "自动执行" else "每次确认"
+                val options = listOf(
+                    false to (
+                        "每次确认（推荐）" to "AI 的写操作先生成草案，你点「确认并执行」后才生效"
+                        ),
+                    true to (
+                        "自动执行" to "AI 的写操作立即生效，不再弹确认；系统保护应用 / 白名单每日添加上限仍有效"
+                        ),
+                )
+                Text(
+                    text = "AI 修改设置、限制、额度、白名单属于「写操作」，可以选择它是否需要你确认。",
+                    fontSize = 11.sp,
+                    color = colors.onSurfaceVariant,
+                    lineHeight = 17.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                options.forEach { (value, texts) ->
+                    val (title, subtitle) = texts
+                    val selected = autoExecute == value
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                if (selected) colors.primary.copy(alpha = 0.10f) else Color.Transparent,
+                            )
+                            .clickable { if (!selected) vm.setAutoExecuteWrites(value) }
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        RadioButton(
+                            selected = selected,
+                            onClick = { if (!selected) vm.setAutoExecuteWrites(value) },
+                        )
+                        Column(modifier = Modifier.weight(1f).padding(top = 10.dp, end = 8.dp)) {
+                            Text(
+                                text = title,
+                                fontSize = 13.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text = subtitle,
+                                fontSize = 11.sp,
+                                color = colors.onSurfaceVariant,
+                                lineHeight = 16.sp,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                }
+                if (autoExecute) {
+                    Text(
+                        text = "自动执行会直接修改设置/限制/额度，请确认你接受这种方式",
+                        fontSize = 11.sp,
+                        color = colors.error,
+                        lineHeight = 16.sp,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                }
+                Text(
+                    text = "当前：$currentChoiceLabel。也可以直接对 AI 说「以后写操作直接执行」或「写操作要我先确认」来切换。",
+                    fontSize = 10.sp,
+                    color = colors.onSurfaceVariant,
+                    lineHeight = 15.sp,
+                )
             }
         }
 

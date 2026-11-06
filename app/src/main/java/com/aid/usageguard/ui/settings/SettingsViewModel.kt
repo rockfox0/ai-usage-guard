@@ -180,6 +180,18 @@ class SettingsViewModel(
         }
     }
 
+    /** AI 操作权限（v1.9.2）：true = 写操作自动执行；false = 每次确认 */
+    fun setAutoExecuteWrites(enabled: Boolean) {
+        viewModelScope.launch {
+            runCatching { settingsRepo.setAutoExecuteWrites(enabled) }
+            message.value = if (enabled) {
+                "已开启自动执行：AI 的写操作会立即生效"
+            } else {
+                "已改为每次确认：AI 的写操作需你点确认"
+            }
+        }
+    }
+
     /** 规划模型（可选，v1.9 Phase 7）：留空表示与默认模型相同 */
     fun saveAiPlannerModel(model: String) {
         viewModelScope.launch {

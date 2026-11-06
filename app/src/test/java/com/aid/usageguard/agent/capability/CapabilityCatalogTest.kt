@@ -26,7 +26,7 @@ class CapabilityCatalogTest {
         // notification_control (4)
         "set_notification_enabled", "set_notification_channels", "set_reminder_style", "send_test_notification",
         // persona_settings (3)
-        "get_user_preferences", "set_ai_persona", "set_ai_analysis_enabled",
+        "get_user_preferences", "set_ai_persona", "set_ai_analysis_enabled", "set_ai_auto_execute",
         // report_management (3)
         "generate_usage_report", "generate_report_now", "get_pending_actions",
         // proactive_insight (3)

@@ -551,3 +551,36 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
 **真机验证（vivo v39）**：
 - 额度内：哔哩哔哩正常打开（前台 `UnitedBizDetailsActivity`，无守护浮层）；
 - 把每日目标临时设为 1 分钟后：哔哩哔哩被拦截（额度逻辑未被破坏）；恢复 360 分钟后正常打开。
+
+---
+
+## 二十九、v1.9.2：AI 写操作权限（每次确认 / 自动执行，用户可选）
+
+**需求**：用户希望 AI 的写操作可以**自动执行**（不必每次点确认），但由用户自己选择。
+
+### 实现
+- 设置项 `auto_execute_writes`（`AppSettings.autoExecuteWrites`，默认 false）：
+  - false = **每次确认**（原行为：写操作只生成草案，用户点「确认并执行」）；
+  - true = **自动执行**（草案生成后立即 `markConfirmed` + `ActionExecutor.execute`）。
+- `agent/action/AutoExecutePolicy.kt`：
+  - `isWriteTool(kind)`（PROPOSE/CONTROL）、`shouldAutoExecute(...)`；
+  - `rewriteExecuted(originalJson, success, message)`：把工具输出改写成 `executed=true/false + autoExecuted + requiresConfirmation=false`，
+    模型据此直接汇报「已生效」，不再提示用户确认；
+  - 两种模式的系统提示词（`AUTO_EXECUTE_HINT` / `CONFIRM_REQUIRED_HINT`）。
+- `AgentLoop`：`ToolKind.PROPOSE` 成功后、且自动执行开启时，取 `opId` → `markConfirmed` → `execute` → `finish` →
+  改写工具输出喂回模型；失败保留原因（如系统保护应用、白名单每日上限）。
+- 新增 AI 工具 `set_ai_auto_execute(enabled)`（PROPOSE→`SET_AI_AUTO_EXECUTE`），支持对话切换；
+  `ActionExecutor` 新增分支、`PendingActionUi` 增加「AI 操作权限」标签。
+- 安全边界不变：自动执行仍走同一 `ActionExecutor`（系统保护应用、白名单每日添加上限、参数校验、防重复执行都保留）。
+
+### UI
+- 设置页「AI 操作权限」卡（模型路由之后）：两个单选行（每次确认（推荐）/ 自动执行）+ 自动执行时红色警示 +
+  「当前：…」+ 提示可直接对 AI 说切换；`autoExecuteWrites` 来自设置 StateFlow，对话切换后实时跟随。
+
+### 验证
+- 单测：新增 `AutoExecutePolicyTest`(7 条) → **149 个单测全部通过**。
+- 真机（vivo v41）：
+  - 设置页卡片出现；点「自动执行」→ `auto_execute_writes=true`；点「每次确认」→ false（均已持久化）；
+  - 开启自动执行后对 AI 说「set my daily target to 350 minutes」→ **无需确认**：`pending_action SET_DAILY_TARGET=EXECUTED`（360→350），
+    `daily_target_minutes=350`，回复「已把每日目标改为 350 分钟（原为 360）。这次是自动执行，已经生效」；
+  - 测试后已恢复 `daily_target_minutes=360`、`auto_execute_writes=false`（默认每次确认）。

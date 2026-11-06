@@ -17,6 +17,7 @@ import com.aid.usageguard.agent.llm.ModelRouter
 import com.aid.usageguard.agent.llm.LlmToolSpec
 import com.aid.usageguard.agent.llm.LlmStreamUnavailableException
 import com.aid.usageguard.agent.llm.normalizeApiBase
+import com.aid.usageguard.agent.action.AutoExecutePolicy
 import com.aid.usageguard.agent.context.ContextEngine
 import com.aid.usageguard.agent.memory.AgentMemory
 import com.aid.usageguard.agent.memory.MemoryEngine
@@ -739,8 +740,19 @@ class AgentLoop(
                             }
                         }
                     }
-                    messages.add(LlmMessage.tool(result.callId, result.toolName, result.output))
-                    emitToolFinished(call.name, call.id, result.ok, result.output, emitEvents)
+                    // v1.9.2：自动执行模式下，PROPOSE 草案生成后立即确认并执行，
+                    // 把「已执行」结果喂回模型（模型不再提示用户确认）
+                    var toolOutput = result.output
+                    if (result.ok && prefs.autoExecuteWrites &&
+                        registry.find(call.name)?.kind == ToolKind.PROPOSE
+                    ) {
+                        autoExecuteDraft(result.output)?.let { executedOutput ->
+                            toolOutput = executedOutput
+                            Log.i(TAG, "auto-executed draft from ${call.name}")
+                        }
+                    }
+                    messages.add(LlmMessage.tool(result.callId, result.toolName, toolOutput))
+                    emitToolFinished(call.name, call.id, result.ok, toolOutput, emitEvents)
                     if (result.ok && registry.find(call.name)?.kind?.let { it != ToolKind.QUERY } == true) {
                         sideEffectsPerformed = true
                     }
@@ -870,6 +882,27 @@ class AgentLoop(
      * 工具结束事件：成功时带一句可验证的摘要（工具的 message），失败时带错误；
      * 若结果是「待确认草案」，额外发 [AgentEvent.ActionProposed] 让 UI 展示确认卡片。
      */
+    /**
+     * 自动执行一份刚生成的待确认草案（v1.9.2）。
+     * 返回改写后的工具输出（executed=true/false）；不是草案或执行失败返回 null（保留原输出）。
+     */
+    private suspend fun autoExecuteDraft(toolOutput: String): String? {
+        val opId = runCatching { org.json.JSONObject(toolOutput).optString("opId") }
+            .getOrNull()?.takeIf { it.isNotBlank() } ?: return null
+        val drafts = runCatching { com.aid.usageguard.data.Container.actionDrafts }.getOrNull()
+            ?: return null
+        val executor = runCatching { com.aid.usageguard.data.Container.actionExecutor }.getOrNull()
+            ?: return null
+        val confirmed = runCatching { drafts.markConfirmed(opId) }.getOrNull() ?: return null
+        val result = runCatching { executor.execute(confirmed) }.getOrNull() ?: return null
+        runCatching { drafts.finish(opId, result.success, result.resultJson, result.error) }
+        Log.i(
+            TAG,
+            "auto execute op=$opId success=${result.success} message=${result.message.take(60)}",
+        )
+        return AutoExecutePolicy.rewriteExecuted(toolOutput, result.success, result.message)
+    }
+
     private fun emitToolFinished(
         toolName: String,
         callId: String,
@@ -942,6 +975,14 @@ class AgentLoop(
             if (section.isNotBlank()) append("\n\n").append(section)
             val persona = personaSection(prefs)
             if (persona.isNotBlank()) append("\n\n").append(persona)
+            // v1.9.2：AI 写操作权限（每次确认 / 自动执行）
+            append("\n\n").append(
+                if (prefs.autoExecuteWrites) {
+                    AutoExecutePolicy.AUTO_EXECUTE_HINT
+                } else {
+                    AutoExecutePolicy.CONFIRM_REQUIRED_HINT
+                },
+            )
             // v1.9 Phase 3：长期记忆（偏好/目标/被拒建议）——只影响建议方式，不能当数据来源
             val memorySection = runCatching { memoryEngine?.promptSection() }.getOrNull()
             if (!memorySection.isNullOrBlank()) {
