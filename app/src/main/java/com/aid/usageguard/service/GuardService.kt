@@ -25,6 +25,7 @@ import com.aid.usageguard.restriction.RestrictionMode
 import com.aid.usageguard.restriction.RestrictionPolicy
 import com.aid.usageguard.restriction.RuleValidator
 import com.aid.usageguard.domain.quota.FocusWindow
+import com.aid.usageguard.domain.quota.QuotaBaseline
 import com.aid.usageguard.domain.quota.QuotaPolicy
 import com.aid.usageguard.domain.quota.QuotaReason
 import com.aid.usageguard.domain.quota.QuotaState
@@ -114,11 +115,12 @@ class GuardService : AccessibilityService() {
             runCatching { creditQuota() }
             runCatching { enforceQuotaMidSession() }
             runCatching { maybeNudge() }
-            // 每 60 秒刷新一次单应用限额（AI/页面修改后无需重启服务）
+            // 每 60 秒：刷新单应用限额 + 用数据库统计校正内部计数（v1.9.4）
             tickCount++
             if (tickCount % 3 == 0) {
                 scope.launch {
                     runCatching { appLimits = Container.quota.limits() }
+                    runCatching { refreshQuotaFromDatabase() }
                 }
             }
             handler.postDelayed(this, 20_000L)
@@ -164,6 +166,9 @@ class GuardService : AccessibilityService() {
             }.onFailure { Log.e(TAG, "quota baseline failed", it) }
         }
         handler.postDelayed(nudgeTicker, 20_000L)
+        // v1.9.4：服务重启/被冻结恢复时，若用户正停在某个应用内，立即按当前窗口重新判定，
+        // 不等下一次窗口切换（否则会出现"已经超额但还能一直用"）
+        handler.postDelayed({ runCatching { reevaluateCurrentForeground() } }, 3_000L)
         scope.launch {
             runCatching {
                 Container.settings.settings.collect { settings ->
@@ -199,20 +204,10 @@ class GuardService : AccessibilityService() {
         // - QUOTA_AFTER_BUDGET：额度内所有应用放行（手动名单不参与），超额交给 QuotaPolicy；
         // - ALWAYS_NON_WHITELIST：始终拦非白名单（手动名单不参与）；
         // - MANUAL_ONLY：只拦手动指定。
-        val alwaysBlockNonWhitelist = restrictionMode == RestrictionMode.ALWAYS_NON_WHITELIST
-        val activeManualBlocks = RestrictionPolicy.manualBlocksFor(restrictionMode, explicitBlocked)
-        val ruleBlocked = RestrictionPolicy.isRestricted(
-            packageName = pkg,
-            allowedPackages = allowedPackages,
-            explicitBlocked = activeManualBlocks,
-            restrictByDefault = alwaysBlockNonWhitelist,
-            protectedPackages = protectedPackages,
-        )
-        val quota = quotaState(pkg)
-        val blocked = ruleBlocked || quota.blocked
+        val (blocked, quota) = evaluateBlocked(pkg)
         Log.d(
             TAG,
-            "win-change pkg=$pkg blocked=$blocked rule=$ruleBlocked mode=$restrictionMode quota=${quota.reason} " +
+            "win-change pkg=$pkg blocked=$blocked mode=$restrictionMode quota=${quota.reason} " +
                 "total=${quota.totalUsedMinutes}/${quota.globalBudgetMinutes}m " +
                 "app=${quota.appUsedMinutes}/${quota.appLimitMinutes ?: "-"}m allowed=${allowedPackages.size}",
         )
@@ -238,6 +233,22 @@ class GuardService : AccessibilityService() {
                 foregroundSince = System.currentTimeMillis()
                 lastNudgeAt = 0L
             }
+        }
+    }
+
+    /** v1.9.4：以无障碍当前窗口重新判定前台应用（服务重启 / 冻结恢复后调用） */
+    private fun reevaluateCurrentForeground() {
+        val pkg = runCatching { rootInActiveWindow?.packageName?.toString() }.getOrNull() ?: return
+        if (pkg == packageName) return
+        if (pkg == "com.android.systemui") return
+        creditQuota(pkg)
+        resetQuotaIfNewDay()
+        val (blocked, quota) = evaluateBlocked(pkg)
+        Log.i(TAG, "reevaluate foreground pkg=$pkg blocked=$blocked reason=${quota.reason}")
+        if (blocked) {
+            val now = System.currentTimeMillis()
+            if (tempAllowPkg == pkg && now < tempAllowUntil) return
+            showOverlay(pkg, quota.takeIf { it.blocked })
         }
     }
 
@@ -435,6 +446,34 @@ class GuardService : AccessibilityService() {
         quotaLastAt = now
     }
 
+    /**
+     * v1.9.4：用数据库里的今日统计校正内部计数（取 max）。
+     *
+     * 为什么需要：服务被冻结/同步延迟时内部计数会偏小，导致"超过限额仍可使用"。
+     * 数据库只增不减，取 max 不会重复累加，也不会把计数改小。
+     */
+    private suspend fun refreshQuotaFromDatabase() {
+        runCatching {
+            val snapshot = Container.quota.todayUsage()
+            resetQuotaIfNewDay()
+            val dbTotal = snapshot.totalMinutes
+            val mergedTotal = QuotaBaseline.mergeTotalMinutes(quotaTotalMs / 60_000L, dbTotal)
+            if (mergedTotal > quotaTotalMs / 60_000L) {
+                Log.i(TAG, "quota corrected from DB: ${quotaTotalMs / 60_000L}m -> ${mergedTotal}m")
+                quotaTotalMs = mergedTotal * 60_000L
+            }
+            val internal = quotaPerAppMs.mapValues { it.value / 60_000L }
+            val merged = QuotaBaseline.mergePerApp(internal, snapshot.perAppMinutes)
+            val corrected = merged.filter { (pkg, minutes) -> minutes > (internal[pkg] ?: 0L) }
+            if (corrected.isNotEmpty()) {
+                Log.i(TAG, "app quota corrected: $corrected")
+                corrected.forEach { (pkg, minutes) -> quotaPerAppMs[pkg] = minutes * 60_000L }
+            }
+            // 校正后立即对当前前台应用再判一次
+            enforceQuotaMidSession()
+        }.onFailure { Log.w(TAG, "refresh quota from DB failed", it) }
+    }
+
     private fun resetQuotaIfNewDay() {
         val today = UsageEventSource.todayDate()
         if (quotaDate != today) {
@@ -462,6 +501,21 @@ class GuardService : AccessibilityService() {
         return FocusWindow.isActive(hour, focusWindowStart, focusWindowEnd)
     }
 
+    /** 统一判定：限制规则 + 额度（v1.9.4 抽出，供窗口事件与服务重启后复用） */
+    private fun evaluateBlocked(pkg: String): Pair<Boolean, QuotaState> {
+        val alwaysBlockNonWhitelist = restrictionMode == RestrictionMode.ALWAYS_NON_WHITELIST
+        val activeManualBlocks = RestrictionPolicy.manualBlocksFor(restrictionMode, explicitBlocked)
+        val ruleBlocked = RestrictionPolicy.isRestricted(
+            packageName = pkg,
+            allowedPackages = allowedPackages,
+            explicitBlocked = activeManualBlocks,
+            restrictByDefault = alwaysBlockNonWhitelist,
+            protectedPackages = protectedPackages,
+        )
+        val quota = quotaState(pkg)
+        return (ruleBlocked || quota.blocked) to quota
+    }
+
     /** 当前应用是否触发额度拦截（UI / AI / Service 共用 QuotaPolicy） */
     private fun quotaState(pkg: String): QuotaState = QuotaPolicy.evaluate(
         packageName = pkg,
@@ -478,6 +532,10 @@ class GuardService : AccessibilityService() {
 
     /** 停留在同一应用超过额度时也要拦（不能等切换应用） */
     private fun enforceQuotaMidSession() {
+        // v1.9.4：浮层被系统移除但引用还在时，重新挂载，避免"看起来没拦"
+        if (overlay != null && overlay?.isAttachedToWindow != true) {
+            hideOverlay()
+        }
         if (overlay != null) return
         val pkg = foregroundPkg ?: return
         if (tempAllowPkg == pkg && System.currentTimeMillis() < tempAllowUntil) return

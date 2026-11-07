@@ -618,3 +618,33 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
 - `set_restrict_mode`（旧）与 `set_restriction_mode`（新）语义重叠，建议后续合并工具
 
 - 版本：versionCode 42 / versionName 1.9.3；**155 个单测全部通过**；vivo 真机安装并验证聊天/限制/专注时段行为正常。
+
+---
+
+## 三十一、v1.9.4：修复「单应用已超限额仍可使用」
+
+**用户报告**：抖音今日已用 62 分钟（限额 60 分钟），但仍然可以使用。
+
+**真机数据**：
+- `app_daily_limit`: `com.ss.android.ugc.aweme = 60`、`tv.danmaku.bili = 30`
+- `app_usage_record` 今日：抖音 3,739,478ms（62.3 分钟）、B 站 7,764,497ms（129.4 分钟）
+- 手动重启无障碍服务后再打开抖音 → **立即被拦截**（浮层出现），说明策略与限额数据本身正确
+
+**根因（两个并发缺陷）**：
+1. `GuardService` 的「今日已用」只在服务启动时从数据库读一次，之后靠前台切换 + 20 秒 ticker 累加。
+   若服务被 OEM 冻结/回收、或数据库同步滞后于实际使用，**内部计数会低于真实值**，
+   于是实际 62 分钟、内部仍 <60 分钟，限额不触发；
+2. 服务在用户停留于某应用内时重启（或被冻结后恢复），`foregroundPkg` 为空，
+   要等下一次窗口切换才判定 —— 用户一直停在抖音里就一直不拦。
+
+**修复（v1.9.4）**：
+1. **每 60 秒用数据库统计校正内部计数**：新增 `QuotaBaseline.mergeTotalMinutes/mergePerApp`（纯函数，取 max，只增不减），
+   ticker 里调用 `refreshQuotaFromDatabase()`，校正后立即再判一次当前前台应用；
+2. **服务重启/冻结恢复后 3 秒**用 `rootInActiveWindow` 重新判定当前前台（`reevaluateCurrentForeground()`），不等窗口切换；
+3. **浮层自愈**：若 `overlay` 引用还在但 `isAttachedToWindow != true`（被系统移除），先丢弃再重新挂载；
+4. 抽出 `evaluateBlocked(pkg)` 统一「规则 + 额度」判定，窗口事件与服务重启复用同一份逻辑。
+
+**验证（vivo v43 / versionName 1.9.4）**：
+- 安装后打开抖音（62 分钟 > 60）→ 立即出现「已强制暂停 抖音」浮层（截图 `out/shots_v17_vivo/52_douyin_blocked.png`）；
+- B 站（129 分钟 > 30）同样被拦；
+- 单测新增 `QuotaBaselineTest`(4) → **159 个单测全部通过**。
