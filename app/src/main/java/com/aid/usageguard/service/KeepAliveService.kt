@@ -32,6 +32,8 @@ class KeepAliveService : Service() {
     private val ticker = object : Runnable {
         override fun run() {
             runCatching { checkAndRestore() }
+            // v1.9.5：每分钟刷新常驻通知里的「今日已用」，避免显示几小时前的旧数字
+            runCatching { refreshTextAsync() }
             handler.postDelayed(this, CHECK_INTERVAL_MS)
         }
     }
@@ -40,6 +42,8 @@ class KeepAliveService : Service() {
         super.onCreate()
         runCatching { Container.init(this) }
         startForeground(NOTIFICATION_ID, buildNotification())
+        foregroundStarted = true
+        refreshTextAsync()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -89,7 +93,9 @@ class KeepAliveService : Service() {
     @Volatile
     private var cachedText: String = "守护运行中"
 
-    private fun buildNotification(): Notification {
+    private var foregroundStarted = false
+
+    private fun buildNotification(text: String = cachedText): Notification {
         ensureChannel(this)
         val open = PendingIntent.getActivity(
             this,
@@ -97,11 +103,10 @@ class KeepAliveService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        refreshTextAsync()
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
             .setContentTitle("AI 使用管家守护中")
-            .setContentText(cachedText)
+            .setContentText(text)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(open)
@@ -110,13 +115,25 @@ class KeepAliveService : Service() {
 
     private val ioScope = CoroutineScope(Dispatchers.IO)
 
+    /**
+     * v1.9.5 修复：通知文案必须定期重新发通知，而不是只改内存里的 cachedText。
+     * 旧实现只在服务启动时算一次文案，之后 never 更新通知——用户会看到几小时前的
+     * 「今日已用 53 / 360 分钟」这种过期数字。
+     */
     private fun refreshTextAsync() {
         ioScope.launch {
-            cachedText = runCatching {
+            val text = runCatching {
                 val minutes = Container.usage.todayTotalMinutes()
                 val target = Container.settings.current().dailyTargetMinutes
                 "今日已用 $minutes / $target 分钟"
             }.getOrDefault("守护运行中")
+            cachedText = text
+            if (foregroundStarted) {
+                runCatching {
+                    val manager = getSystemService(NotificationManager::class.java) ?: return@runCatching
+                    manager.notify(NOTIFICATION_ID, buildNotification(text))
+                }
+            }
         }
     }
 

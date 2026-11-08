@@ -648,3 +648,25 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
 - 安装后打开抖音（62 分钟 > 60）→ 立即出现「已强制暂停 抖音」浮层（截图 `out/shots_v17_vivo/52_douyin_blocked.png`）；
 - B 站（129 分钟 > 30）同样被拦；
 - 单测新增 `QuotaBaselineTest`(4) → **159 个单测全部通过**。
+
+---
+
+## 三十四、v1.9.5：常驻通知用量数字不刷新（显示几小时前的值）
+
+**用户反馈**：明明已用 300 多分钟，通知/显示「053 分钟」。
+
+**排查**：
+- 数据库实时数据正确：`app_usage_record` 今日合计 376 分钟（王者 159、微信 88、B 站 69…）；
+- 问题在 `KeepAliveService` 的常驻通知：
+  - `buildNotification()` 里调用 `refreshTextAsync()`（异步）后**立刻**用 `cachedText` 构建通知，首次拿到的是默认文案；
+  - 之后 `refreshTextAsync` 只更新内存 `cachedText`，**从不重新发通知**；
+  - 于是通知栏一直停在服务启动时算出的旧值（例如早上 53 分钟），几小时不变。
+
+**修复（v1.9.5）**：
+1. `buildNotification(text)` 改为显式传入文案，不再内部触发刷新；
+2. `refreshTextAsync()` 算完后通过 `NotificationManager.notify` **更新常驻通知**；
+3. 服务启动后异步刷新一次 + ticker 每 60 秒刷新一次（`今日已用 X / 目标 分钟`）。
+
+**验证（vivo，versionCode 44 / 1.9.5）**：
+- 通知文案 `今日已用 375 / 360 分钟` → 一分钟/重启后 `376 / 360 分钟`，与数据库 376.1 分钟一致；
+- 159 个单测通过。
