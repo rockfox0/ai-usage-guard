@@ -49,6 +49,11 @@ class DebugReceiver : BroadcastReceiver() {
                         Log.i(TAG, "debug sync: $result")
                     }
 
+                    ACTION_RUN_MAINTENANCE -> {
+                        val summary = Container.maintenance.prune()
+                        Log.i(TAG, "debug maintenance: deleted=${summary.totalDeleted} $summary")
+                    }
+
                     ACTION_RUN_PROACTIVE -> {
                         val insight = ProactiveAgent(
                             usage = Container.usage,
@@ -75,5 +80,6 @@ class DebugReceiver : BroadcastReceiver() {
         const val ACTION_RUN_MONITORS = "com.aid.usageguard.DEBUG_RUN_MONITORS"
         const val ACTION_RUN_SYNC = "com.aid.usageguard.DEBUG_RUN_SYNC"
         const val ACTION_RUN_PROACTIVE = "com.aid.usageguard.DEBUG_RUN_PROACTIVE"
+        const val ACTION_RUN_MAINTENANCE = "com.aid.usageguard.DEBUG_RUN_MAINTENANCE"
     }
 }

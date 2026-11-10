@@ -25,6 +25,9 @@ class UsageSyncWorker(
                 return Result.success()
             }
             val ingest = Container.usage.refresh()
+            // v1.10：每天顺带做一次数据库保留清理（明细过期删除，聚合保留）
+            runCatching { Container.maintenance.pruneIfDue() }
+                .onFailure { Log.w(TAG, "prune failed", it) }
             Log.i(
                 TAG,
                 "sync done: sessions=${ingest.sessions} days=${ingest.daysTouched} " +

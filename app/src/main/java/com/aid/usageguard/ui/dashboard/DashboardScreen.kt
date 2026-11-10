@@ -398,6 +398,10 @@ private fun TodayCard(state: DashboardUiState) {
                     Text("已超目标", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = colors.error)
                 }
             }
+            state.dataWarning?.let { warning ->
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(warning, fontSize = 11.sp, color = colors.error)
+            }
             if (state.targetMinutes > 0L || state.focusWindowActive) {
                 Spacer(modifier = Modifier.height(4.dp))
                 val quotaText = when {

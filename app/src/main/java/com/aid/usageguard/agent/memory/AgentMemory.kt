@@ -21,10 +21,15 @@ class AgentMemory(private val dao: AgentMessageDao) {
         appendMessage(sessionId, ROLE_USER, text, emptyList())
     }
 
-    /** 追加助手回复（带本次调用的工具名） */
-    suspend fun appendAssistant(sessionId: String, text: String, toolCalls: List<String> = emptyList()) {
+    /** 追加助手回复（带本次调用的工具名 + 可选的结构化卡片 JSON） */
+    suspend fun appendAssistant(
+        sessionId: String,
+        text: String,
+        toolCalls: List<String> = emptyList(),
+        structuredJson: String? = null,
+    ) {
         if (text.isBlank()) return
-        appendMessage(sessionId, ROLE_ASSISTANT, text, toolCalls)
+        appendMessage(sessionId, ROLE_ASSISTANT, text, toolCalls, structuredJson)
     }
 
     suspend fun appendMessage(
@@ -32,6 +37,7 @@ class AgentMemory(private val dao: AgentMessageDao) {
         role: String,
         content: String,
         toolCalls: List<String> = emptyList(),
+        structuredJson: String? = null,
     ) {
         dao.insert(
             AgentMessageEntity(
@@ -40,6 +46,7 @@ class AgentMemory(private val dao: AgentMessageDao) {
                 content = content,
                 timestamp = System.currentTimeMillis(),
                 toolCalls = toolCalls.distinct().takeIf { it.isNotEmpty() }?.joinToString(","),
+                structuredJson = structuredJson,
             ),
         )
     }
@@ -98,6 +105,7 @@ class AgentMemory(private val dao: AgentMessageDao) {
             ?.map { it.trim() }
             ?.filter { it.isNotEmpty() }
             ?: emptyList(),
+        structuredJson = structuredJson,
     )
 
     companion object {

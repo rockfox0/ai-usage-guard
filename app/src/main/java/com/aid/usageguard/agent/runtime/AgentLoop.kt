@@ -584,6 +584,8 @@ class AgentLoop(
             var finalText = ""
             var finalOk = false
             var nudged = false
+            var networkRetried = false
+            var emittedAnyText = false
 
             /** 一次流式模型请求（含超时与增量回调） */
             suspend fun streamOnce(): LlmResponse =
@@ -594,6 +596,7 @@ class AgentLoop(
                         tools = visibleSpecs,
                         maxTokens = null,
                         onTextDelta = { delta ->
+                            if (delta.isNotBlank()) emittedAnyText = true
                             if (taskJob?.isActive != false) emit(AgentEvent.TextDelta(delta))
                         },
                     )
@@ -647,6 +650,19 @@ class AgentLoop(
                             if (taskJob?.isActive != false) emit(AgentEvent.TextDelta(fallback.text))
                         }
                         fallback
+                    } else if (!sideEffectsPerformed && !emittedAnyText && !networkRetried &&
+                        isRetryableNetworkFailure(e)
+                    ) {
+                        // v1.10：网络抖动/超时自动重试一次（仅当本任务还没有副作用、也没有输出任何文字）
+                        networkRetried = true
+                        val retryStop = budget.tryConsumeModelRequest()
+                        if (retryStop != null) {
+                            budgetStop = retryStop
+                            throw e
+                        }
+                        Log.w(TAG, "network failure, retrying once: ${e.message}")
+                        kotlinx.coroutines.delay(700L)
+                        streamOnce()
                     } else {
                         throw e
                     }
@@ -817,9 +833,13 @@ class AgentLoop(
             }
             // 报告任务预算不足时返回 ok=false，让上层走本地规则报告；对话里则把部分结果正常展示
             // v1.9 Phase 4：若模型附带白名单 JSON 块，剥离正文并发出结构化事件（解析失败则保持原样）
+            var structuredJson: String? = null
             if (request.scope == TaskScope.CHAT && text.isNotBlank()) {
                 runCatching { ResponseParser.extract(text) }.getOrNull()?.let { extracted ->
                     text = extracted.text.ifBlank { text }
+                    structuredJson = runCatching {
+                        com.aid.usageguard.agent.response.ResponseCodec.encode(extracted.response)
+                    }.getOrNull()
                     emit(AgentEvent.StructuredResponse(extracted.response.title, extracted.response.blocks))
                     Log.i(TAG, "structured response: blocks=${extracted.response.blocks.size}")
                 }
@@ -829,7 +849,14 @@ class AgentLoop(
                 )
 
             if (request.useMemory && text.isNotBlank()) {
-                runCatching { memory.appendAssistant(request.sessionId, text, usedTools.distinct()) }
+                runCatching {
+                    memory.appendAssistant(
+                        sessionId = request.sessionId,
+                        text = text,
+                        toolCalls = usedTools.distinct(),
+                        structuredJson = structuredJson,
+                    )
+                }
             }
             _state.value = _state.value.finish(if (ok) AgentPhase.DONE else AgentPhase.FAILED)
 
@@ -957,6 +984,18 @@ class AgentLoop(
             .takeLast(4)
             .map { it.content }
         return ToolEvidence.fallbackText(toolNames, outputs, reason)
+    }
+
+    /** v1.10：是否属于可安全重试的网络类失败（无副作用时最多重试一次） */
+    private fun isRetryableNetworkFailure(error: LlmException): Boolean {
+        val message = error.message.orEmpty()
+        return message.contains("网络请求失败") ||
+            message.contains("连接") ||
+            message.contains("超时") ||
+            message.contains("timeout", ignoreCase = true) ||
+            message.contains("Connection", ignoreCase = true) ||
+            message.contains("HTTP 5") ||
+            message.contains("HTTP 429")
     }
 
     private fun friendlyError(error: Throwable): String = when (error) {

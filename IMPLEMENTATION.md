@@ -697,3 +697,40 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
 **验证（vivo，versionCode 45 / 1.9.6）**：
 - 停留在首页 70 秒，`last_ingest_at` 自动前进（1794275171315 → 1794275244872），界面出现「更新于 09:47」；
 - 159 个单测通过。
+
+---
+
+## 三十六、v1.10.0：问题 2–6（数据新鲜度 / 一致性 / 重试 / 卡片持久化 / DB 清理）
+
+### 问题 2：AI 回答数字滞后
+- 原因：AI 工具只读数据库，后台采集最多 30 分钟一次。
+- 修复：`UsageRepository.refreshIfStale()`（纯函数 `UsageRefreshPolicy` 判定，>60 秒才采集）；
+  `AgentLoop.runTask` 在 CHAT/REPORT/INSIGHT 任务开始前调用，回答基于最新数据。
+- 验证：提问时 `last_ingest_at` 前进到 10:10:59。
+
+### 问题 3：数据一致性
+- `ScoreRepository.persist()` 在首页刷新时实时重算今日评分并落库（原来读 Worker 30 分钟前落库的旧评分，
+  会出现「总时长变了、时段分布没变」）。
+- 新增 `UsageConsistency.verify(总分, App 合计, 时段合计)`：超过 ±2 分钟显示「数据正在重算」提示，
+  一致时不显示。真机首页无警告。
+
+### 问题 4：AI 请求失败
+- 网络类失败（连接/超时/HTTP 5xx/429）在「无副作用、未输出任何文字」时自动重试 1 次（计预算）；
+- 失败且没有输出时把原文恢复到输入框，方便直接重发（`lastPrompt`）。
+
+### 问题 5：结构化卡片持久化
+- DB v8：`agent_message` 增加 `structuredJson` 列（迁移 `ALTER TABLE`）；新增 `ResponseCodec` 编解码（复用白名单解析）。
+- `AgentLoop` 保存结构化回复；助手页加载历史时还原最近一条带卡片的回复（含图表数据）。
+- 验证：真机发「用卡片展示」→ `structuredJson` 长度 816 入库；切到首页再回助手页，卡片与图表正常显示。
+
+### 问题 6：数据库只增不减
+- 新增 `RetentionPolicy`：`usage_session` 明细 90 天、行为/报告/反馈/洞察 180 天、对话 90 天、
+  已完成草案 30 天、监控触发 365 天、长期记忆每种 kind 保留 200 条；聚合表 `app_usage_record` 永久保留。
+- `DatabaseMaintenance.pruneIfDue()`（每天一次，`last_prune_at`）由 `UsageSyncWorker` 顺带执行；
+  `DebugReceiver` 增加 `DEBUG_RUN_MAINTENANCE` 手动触发。
+- 验证：广播触发 `debug maintenance: deleted=0`（数据都在保留期内，逻辑正常）。
+
+### 验证
+- 单测 **171 个全部通过**（新增 RefreshPolicy/Consistency/Retention/Codec 共 12 个）
+- vivo 真机 v46 / versionName 1.10.0：DB 升级到 user_version=8、卡片持久化与还原、首页自动刷新、
+  AI 任务触发采集、维护日志均验证通过。

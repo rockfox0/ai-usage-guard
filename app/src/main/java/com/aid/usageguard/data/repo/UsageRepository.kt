@@ -30,6 +30,24 @@ class UsageRepository(
     suspend fun refresh(): UsageIngester.IngestResult = ingester.ingest()
 
     /**
+     * v1.10：只有数据过期时才增量采集（AI 任务开始前调用）。
+     * 返回是否真的执行了采集。
+     */
+    suspend fun refreshIfStale(
+        maxAgeMs: Long = DEFAULT_MAX_AGE_MS,
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (!source.hasUsageAccess()) return@withContext false
+        val last = runCatching { db.syncStateDao().get(KEY_LAST_INGEST) }.getOrNull()
+        if (!com.aid.usageguard.domain.usage.UsageRefreshPolicy.shouldRefresh(
+                System.currentTimeMillis(), last, maxAgeMs,
+            )
+        ) {
+            return@withContext false
+        }
+        runCatching { ingester.ingest() }.isSuccess
+    }
+
+    /**
      * 数据覆盖检查（v1.7 方案 4.2）：请求范围 vs 实际有数据的日期。
      * 缺失日期不会被补零，调用方应只基于 [DataCoverage.validDates] 下结论。
      */
@@ -194,3 +212,6 @@ class UsageRepository(
 }
 
 private const val KEY_LAST_INGEST = "last_ingest_at"
+
+/** AI 任务开始前，使用数据的新鲜度阈值 */
+private const val DEFAULT_MAX_AGE_MS = 60_000L

@@ -156,9 +156,13 @@ class AssistantViewModel(
      * 发送瞬间把上下文快照成 [AgentContext]（entryPage / focusPackage / rangeDays），
      * 之后 chip 再变化也不会影响这次任务。
      */
+    /** v1.10：失败时用于恢复输入框 */
+    private var lastPrompt: String = ""
+
     fun send() {
         val text = _state.value.input.trim()
         if (text.isEmpty() || _state.value.sending) return
+        lastPrompt = text
 
         val snapshot = _state.value
         val context = AgentContext(
@@ -384,7 +388,13 @@ class AssistantViewModel(
             }
 
             is AgentEvent.Failed -> _state.update {
-                it.copy(error = event.message, toolStatus = null)
+                // v1.10：请求失败且没有输出任何内容时，把原文放回输入框，方便直接重发
+                val restore = it.streamingText.isBlank() && it.input.isBlank()
+                it.copy(
+                    error = event.message,
+                    toolStatus = null,
+                    input = if (restore) lastPrompt else it.input,
+                )
             }
 
             is AgentEvent.Cancelled -> finalizeCancelled()
@@ -462,7 +472,23 @@ class AssistantViewModel(
     private fun loadHistory() {
         viewModelScope.launch {
             val history = runCatching { memory.history(SESSION_ID) }.getOrDefault(emptyList())
-            _state.update { it.copy(messages = history, loadingHistory = false) }
+            // v1.10：还原最近一条带结构化卡片的回复（之前卡片只存在内存，重进页面就丢了）
+            val lastStructured = history.lastOrNull {
+                it.role == AgentMemory.ROLE_ASSISTANT && !it.structuredJson.isNullOrBlank()
+            }
+            val restored = com.aid.usageguard.agent.response.ResponseCodec.decode(lastStructured?.structuredJson)
+            _state.update {
+                it.copy(
+                    messages = history,
+                    loadingHistory = false,
+                    structuredTitle = restored?.title,
+                    structuredBlocks = restored?.blocks ?: emptyList(),
+                )
+            }
+            if (restored?.blocks?.any { b -> b is com.aid.usageguard.agent.response.ResponseBlock.ChartBlock } == true) {
+                val days = runCatching { usage.dailyTotalsForLastDays(7) }.getOrDefault(emptyList())
+                _state.update { it.copy(chartDaily = days) }
+            }
         }
     }
 

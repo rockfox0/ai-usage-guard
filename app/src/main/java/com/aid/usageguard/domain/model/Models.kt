@@ -81,6 +81,8 @@ data class ChatMessageModel(
     val content: String,
     val timestamp: Long,
     val toolCalls: List<String> = emptyList(),
+    /** v1.10：该条回复的结构化卡片 JSON（重进助手页可还原） */
+    val structuredJson: String? = null,
 )
 
 fun Long.toMinutes(): Long = this / 60_000L

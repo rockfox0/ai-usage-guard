@@ -43,6 +43,10 @@ object Container {
     lateinit var score: ScoreRepository
         private set
 
+    /** v1.10：数据库保留策略清理 */
+    lateinit var maintenance: DatabaseMaintenance
+        private set
+
     /** v1.8：全局每日额度 + 单应用每日限额 */
     lateinit var quota: QuotaRepository
         private set
@@ -102,6 +106,7 @@ object Container {
             monitors = MonitorRepository(db)
             insights = InsightRepository(db)
             actionExecutor = ActionExecutor(settings, restrictions, usage, quota, whitelist, monitors)
+            maintenance = DatabaseMaintenance(db)
             initialized = true
         }
     }

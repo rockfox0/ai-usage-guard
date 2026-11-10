@@ -123,6 +123,9 @@ interface AgentReportDao {
     @Query("SELECT * FROM agent_report ORDER BY createdAt DESC LIMIT :limit")
     suspend fun recent(limit: Int): List<AgentReportEntity>
 
+    @Query("DELETE FROM agent_report WHERE createdAt < :before")
+    suspend fun deleteBefore(before: Long): Int
+
     @Query("DELETE FROM agent_report")
     suspend fun clear()
 }
@@ -167,6 +170,10 @@ interface AgentMessageDao {
 
     @Query("SELECT * FROM agent_message ORDER BY timestamp DESC LIMIT :limit")
     suspend fun recent(limit: Int): List<AgentMessageEntity>
+
+    /** v1.10：清理过旧对话（保留策略见 RetentionPolicy） */
+    @Query("DELETE FROM agent_message WHERE timestamp < :before")
+    suspend fun deleteBefore(before: Long): Int
 
     @Query("DELETE FROM agent_message")
     suspend fun clear()
@@ -246,6 +253,13 @@ interface AgentMemoryDao {
     @Query("DELETE FROM agent_memory WHERE kind = :kind AND memKey = :key")
     suspend fun delete(kind: String, key: String)
 
+    /** v1.10：每种 kind 只保留最近 [keep] 条 */
+    @Query(
+        "DELETE FROM agent_memory WHERE kind = :kind AND memKey NOT IN (" +
+            "SELECT memKey FROM agent_memory WHERE kind = :kind ORDER BY updatedAt DESC LIMIT :keep)",
+    )
+    suspend fun trimKind(kind: String, keep: Int): Int
+
     @Query("DELETE FROM agent_memory")
     suspend fun clear()
 }
@@ -282,6 +296,9 @@ interface AgentFeedbackDao {
     @Query("SELECT COUNT(*) FROM agent_feedback WHERE createdAt >= :since")
     suspend fun countSince(since: Long): Int
 
+    @Query("DELETE FROM agent_feedback WHERE createdAt < :before")
+    suspend fun deleteBefore(before: Long): Int
+
     @Query("DELETE FROM agent_feedback")
     suspend fun clear()
 }
@@ -317,6 +334,9 @@ interface MonitorTriggerDao {
 
     @Query("SELECT COUNT(*) FROM monitor_trigger WHERE ruleId = :ruleId AND date = :date")
     suspend fun countFor(ruleId: String, date: String): Int
+
+    @Query("DELETE FROM monitor_trigger WHERE triggeredAt < :before")
+    suspend fun deleteBefore(before: Long): Int
 }
 
 @Dao
@@ -335,4 +355,7 @@ interface ProactiveInsightDao {
 
     @Query("UPDATE proactive_insight SET `read` = 1 WHERE id = :id")
     suspend fun markRead(id: String)
+
+    @Query("DELETE FROM proactive_insight WHERE date < :before")
+    suspend fun deleteBeforeDate(before: String): Int
 }

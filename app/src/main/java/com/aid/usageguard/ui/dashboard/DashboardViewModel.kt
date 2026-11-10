@@ -42,6 +42,8 @@ data class DashboardUiState(
     val todayMinutes: Long = 0L,
     /** 数据最近一次刷新时间（展示「更新于 HH:mm」，让用户知道数据新鲜度） */
     val lastUpdatedAt: Long = 0L,
+    /** 数据一致性提示（总分 vs App 合计 vs 时段分布）；null 表示一致 */
+    val dataWarning: String? = null,
     val targetMinutes: Long = 0L,
     /** 今日使用最长的 5 个 App（按分钟降序） */
     val topApps: List<AppUsageSummary> = emptyList(),
@@ -134,10 +136,21 @@ class DashboardViewModel(
                 val today = usage.todayTotalMinutes()
                 val ranking = usage.todayRanking()
                 val week = usage.weekTotals()
-                // 评分读取失败不应影响其它卡片
-                val todayScore = runCatching { scoreRepository.todayScore() }.getOrNull()
+                // v1.10：评分实时重算并落库（原来是读 Worker 30 分钟前落库的旧评分，
+                // 会出现「总时长已变、时段分布没变」的不一致）
+                val todayScore = runCatching { scoreRepository.persist() }.getOrNull()
                 val anomalies = runCatching { behavior.countToday() }.getOrDefault(0)
                 val configured = runCatching { agentRuntime.isConfigured() }.getOrDefault(false)
+                val appSum = ranking.sumOf { it.minutes }
+                val slotSum = todayScore?.slots?.sumOf { it.minutes } ?: 0L
+                val consistency = com.aid.usageguard.domain.usage.UsageConsistency.verify(
+                    totalMinutes = today,
+                    appSumMinutes = appSum,
+                    slotSumMinutes = slotSum,
+                )
+                if (!consistency.ok) {
+                    android.util.Log.w("DashboardViewModel", consistency.message.orEmpty())
+                }
                 _state.update {
                     it.copy(
                         loading = false,
@@ -145,6 +158,7 @@ class DashboardViewModel(
                         hasUsageAccess = hasAccess,
                         todayMinutes = today,
                         lastUpdatedAt = System.currentTimeMillis(),
+                        dataWarning = consistency.message,
                         topApps = ranking.filter { app -> app.minutes > 0L }.take(5),
                         distribution = buildShares(ranking, today),
                         weekTotals = week,

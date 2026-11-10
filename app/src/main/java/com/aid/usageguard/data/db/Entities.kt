@@ -100,6 +100,8 @@ data class AgentMessageEntity(
     val timestamp: Long,
     /** 模型调用的工具名，逗号分隔，可空 */
     val toolCalls: String? = null,
+    /** v1.10：结构化回复 JSON（卡片持久化，重进助手页可还原） */
+    val structuredJson: String? = null,
 )
 
 /** 每日使用评分（时长 + 时段 + 目标对比），用于今日打分 / 每日周总结 / 历史趋势 */
