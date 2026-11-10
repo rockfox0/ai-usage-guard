@@ -28,12 +28,19 @@ class KeepAliveService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var lastNotifyAt = 0L
+    private var lastIngestAt = 0L
 
     private val ticker = object : Runnable {
         override fun run() {
             runCatching { checkAndRestore() }
             // v1.9.5：每分钟刷新常驻通知里的「今日已用」，避免显示几小时前的旧数字
             runCatching { refreshTextAsync() }
+            // v1.9.6：每 5 分钟做一次增量采集，App 没打开时数据/通知也不会落后太多
+            val now = System.currentTimeMillis()
+            if (now - lastIngestAt > 5 * 60_000L) {
+                lastIngestAt = now
+                ioScope.launch { runCatching { Container.usage.refresh() } }
+            }
             handler.postDelayed(this, CHECK_INTERVAL_MS)
         }
     }

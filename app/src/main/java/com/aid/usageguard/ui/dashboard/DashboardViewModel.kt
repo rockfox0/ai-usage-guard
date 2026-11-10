@@ -40,6 +40,8 @@ data class DashboardUiState(
     val refreshing: Boolean = false,
     val hasUsageAccess: Boolean = false,
     val todayMinutes: Long = 0L,
+    /** 数据最近一次刷新时间（展示「更新于 HH:mm」，让用户知道数据新鲜度） */
+    val lastUpdatedAt: Long = 0L,
     val targetMinutes: Long = 0L,
     /** 今日使用最长的 5 个 App（按分钟降序） */
     val topApps: List<AppUsageSummary> = emptyList(),
@@ -142,6 +144,7 @@ class DashboardViewModel(
                         refreshing = false,
                         hasUsageAccess = hasAccess,
                         todayMinutes = today,
+                        lastUpdatedAt = System.currentTimeMillis(),
                         topApps = ranking.filter { app -> app.minutes > 0L }.take(5),
                         distribution = buildShares(ranking, today),
                         weekTotals = week,

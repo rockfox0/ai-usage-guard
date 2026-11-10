@@ -35,6 +35,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,6 +53,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.delay
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aid.usageguard.data.Container
@@ -94,6 +98,17 @@ fun DashboardScreen(
 
     // 每次进入页面都确保有一次采集+查询（ViewModel 内部已做并发去重）
     LaunchedEffect(Unit) { viewModel.refresh() }
+    // v1.9.6：停留在首页时每 60 秒自动刷新，不需要重启 App 才能看到最新用量
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val currentViewModel by rememberUpdatedState(viewModel)
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (true) {
+                delay(60_000L)
+                currentViewModel.refresh()
+            }
+        }
+    }
     var accessibilityOn by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
 
     // 从系统设置页返回时：重新读取无障碍状态并刷新数据
@@ -342,7 +357,18 @@ private fun TodayCard(state: DashboardUiState) {
         colors = CardDefaults.cardColors(containerColor = colors.surface),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("今日使用", fontSize = 12.sp, color = colors.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("今日使用", fontSize = 12.sp, color = colors.onSurfaceVariant)
+                if (state.lastUpdatedAt > 0L) {
+                    Spacer(modifier = Modifier.weight(1f))
+                    Text(
+                        text = "更新于 " + java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                            .format(java.util.Date(state.lastUpdatedAt)),
+                        fontSize = 11.sp,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+            }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = formatMinutes(state.todayMinutes),
