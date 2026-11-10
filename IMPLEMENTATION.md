@@ -734,3 +734,25 @@ UG_API_KEY='sk-xxx' UG_BASE_URL='http://host:18080' ./scripts/ug_setup_device.sh
 - 单测 **171 个全部通过**（新增 RefreshPolicy/Consistency/Retention/Codec 共 12 个）
 - vivo 真机 v46 / versionName 1.10.0：DB 升级到 user_version=8、卡片持久化与还原、首页自动刷新、
   AI 任务触发采集、维护日志均验证通过。
+
+---
+
+## 三十七、v1.10.1：拦截浮层显示「已用 445 分钟」而实际只有几小时
+
+**用户反馈**：拦截时浮层显示今天已用 445 分钟，但实际只有 3 个多小时。
+
+**根因**：`GuardService` 的「今日已用」用**手工墙钟累加**：
+- 每个前台切换/20 秒 ticker 都把时间差累加进 `quotaTotalMs`，且累加时不过滤包名；
+- 桌面、系统 UI、拦截浮层、息屏（ticker 仍在跑）的时间全被算进总时长；
+- 在 App 内时 `onAccessibilityEvent` 提前 return，之后切走会把这段 App 时间算给上一个应用；
+- 数值只增不减（v1.9.4 的 `max(内部, DB)` 也无法把它降下来）→ 445 分钟。
+
+**修复（v1.10.1）**：额度完全以数据库为准：
+1. 删除 `creditQuota` 手工累加与 `quotaLastPkg/quotaLastAt`；
+2. ticker 每 20 秒 `syncQuotaFromDatabase()`：屏幕亮时先 `refreshIfStale(60s)` 增量采集，再把
+   `quotaTotalMs/quotaPerAppMs` **直接覆盖**为数据库统计值；
+3. 新的一天清空后异步重载数据库值；
+4. 日志 `quota sync from DB: total=257m apps=23` 与数据库一致（445 不再出现）。
+
+**验证**：vivo 日志 `quota sync from DB: total=257m` ↔ 数据库 `app_usage_record` 今日 257.3 分钟一致；
+167 单测通过；versionCode 47 / versionName 1.10.1。

@@ -25,7 +25,6 @@ import com.aid.usageguard.restriction.RestrictionMode
 import com.aid.usageguard.restriction.RestrictionPolicy
 import com.aid.usageguard.restriction.RuleValidator
 import com.aid.usageguard.domain.quota.FocusWindow
-import com.aid.usageguard.domain.quota.QuotaBaseline
 import com.aid.usageguard.domain.quota.QuotaPolicy
 import com.aid.usageguard.domain.quota.QuotaReason
 import com.aid.usageguard.domain.quota.QuotaState
@@ -97,8 +96,6 @@ class GuardService : AccessibilityService() {
     private var quotaDate: String = ""
     private var quotaTotalMs: Long = 0L
     private val quotaPerAppMs = HashMap<String, Long>()
-    private var quotaLastPkg: String? = null
-    private var quotaLastAt: Long = 0L
 
     // ---- 实时提示（陪伴模式） ----
     private var foregroundPkg: String? = null
@@ -112,16 +109,14 @@ class GuardService : AccessibilityService() {
     private var tickCount = 0
     private val nudgeTicker = object : Runnable {
         override fun run() {
-            runCatching { creditQuota() }
+            // v1.10.1：额度改为「数据库为准」——手工累加墙钟时间会把桌面/系统 UI/
+            // 拦截浮层/息屏时间也算进「今日已用」，导致显示 445 分钟而实际只有 3 小时。
+            runCatching { syncQuotaFromDatabase() }
             runCatching { enforceQuotaMidSession() }
             runCatching { maybeNudge() }
-            // 每 60 秒：刷新单应用限额 + 用数据库统计校正内部计数（v1.9.4）
             tickCount++
             if (tickCount % 3 == 0) {
-                scope.launch {
-                    runCatching { appLimits = Container.quota.limits() }
-                    runCatching { refreshQuotaFromDatabase() }
-                }
+                scope.launch { runCatching { appLimits = Container.quota.limits() } }
             }
             handler.postDelayed(this, 20_000L)
         }
@@ -197,7 +192,6 @@ class GuardService : AccessibilityService() {
         val isSystemUi = pkg == "com.android.systemui" || pkg.contains("systemui")
         lastForegroundPkg = pkg
 
-        creditQuota(pkg)
         resetQuotaIfNewDay()
 
         // 限制模式（v1.9.1 修正）：
@@ -241,7 +235,6 @@ class GuardService : AccessibilityService() {
         val pkg = runCatching { rootInActiveWindow?.packageName?.toString() }.getOrNull() ?: return
         if (pkg == packageName) return
         if (pkg == "com.android.systemui") return
-        creditQuota(pkg)
         resetQuotaIfNewDay()
         val (blocked, quota) = evaluateBlocked(pkg)
         Log.i(TAG, "reevaluate foreground pkg=$pkg blocked=$blocked reason=${quota.reason}")
@@ -430,20 +423,20 @@ class GuardService : AccessibilityService() {
         super.onDestroy()
     }
 
-    /** 把「上次结算到当前」的时长记到上一个前台应用上 */
-    private fun creditQuota(currentPkg: String? = quotaLastPkg) {
-        val now = System.currentTimeMillis()
-        val lastAt = quotaLastAt
-        val lastPkg = quotaLastPkg
-        if (lastAt > 0 && lastPkg != null && lastPkg != packageName) {
-            val delta = (now - lastAt).coerceIn(0L, 5 * 60_000L)
-            if (delta > 0) {
-                quotaTotalMs += delta
-                quotaPerAppMs[lastPkg] = (quotaPerAppMs[lastPkg] ?: 0L) + delta
+    /**
+     * v1.10.1：每 20 秒从数据库同步一次额度（屏幕亮着时顺带触发增量采集）。
+     *
+     * 旧实现按「前台切换/20 秒 ticker」手工累加墙钟时间，且 total 累加时不过滤包名，
+     * 会把桌面、系统 UI、拦截浮层、息屏时间都算进「今日已用」，数值只增不减。
+     */
+    private fun syncQuotaFromDatabase() {
+        scope.launch {
+            runCatching {
+                val interactive = (getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).isInteractive
+                if (interactive) Container.usage.refreshIfStale(60_000L)
+                refreshQuotaFromDatabase()
             }
         }
-        quotaLastPkg = currentPkg
-        quotaLastAt = now
     }
 
     /**
@@ -455,21 +448,14 @@ class GuardService : AccessibilityService() {
     private suspend fun refreshQuotaFromDatabase() {
         runCatching {
             val snapshot = Container.quota.todayUsage()
-            resetQuotaIfNewDay()
-            val dbTotal = snapshot.totalMinutes
-            val mergedTotal = QuotaBaseline.mergeTotalMinutes(quotaTotalMs / 60_000L, dbTotal)
-            if (mergedTotal > quotaTotalMs / 60_000L) {
-                Log.i(TAG, "quota corrected from DB: ${quotaTotalMs / 60_000L}m -> ${mergedTotal}m")
-                quotaTotalMs = mergedTotal * 60_000L
+            quotaDate = UsageEventSource.todayDate()
+            quotaTotalMs = snapshot.totalMinutes * 60_000L
+            quotaPerAppMs.clear()
+            snapshot.perAppMinutes.forEach { (pkg, minutes) ->
+                quotaPerAppMs[pkg] = minutes * 60_000L
             }
-            val internal = quotaPerAppMs.mapValues { it.value / 60_000L }
-            val merged = QuotaBaseline.mergePerApp(internal, snapshot.perAppMinutes)
-            val corrected = merged.filter { (pkg, minutes) -> minutes > (internal[pkg] ?: 0L) }
-            if (corrected.isNotEmpty()) {
-                Log.i(TAG, "app quota corrected: $corrected")
-                corrected.forEach { (pkg, minutes) -> quotaPerAppMs[pkg] = minutes * 60_000L }
-            }
-            // 校正后立即对当前前台应用再判一次
+            Log.i(TAG, "quota sync from DB: total=${snapshot.totalMinutes}m apps=${snapshot.perAppMinutes.size} date=$quotaDate")
+            // 同步后立即对当前前台应用再判一次（额度变化可能刚好触发拦截）
             enforceQuotaMidSession()
         }.onFailure { Log.w(TAG, "refresh quota from DB failed", it) }
     }
@@ -480,17 +466,7 @@ class GuardService : AccessibilityService() {
             quotaDate = today
             quotaTotalMs = 0L
             quotaPerAppMs.clear()
-            quotaLastAt = 0L
-            scope.launch {
-                runCatching {
-                    val snapshot = Container.quota.todayUsage()
-                    quotaTotalMs = snapshot.totalMinutes * 60_000L
-                    quotaPerAppMs.clear()
-                    snapshot.perAppMinutes.forEach { (pkg, minutes) ->
-                        quotaPerAppMs[pkg] = minutes * 60_000L
-                    }
-                }
-            }
+            scope.launch { runCatching { refreshQuotaFromDatabase() } }
         }
     }
 
